@@ -1,0 +1,30 @@
+{
+  "delta_unique_models_from_reference": 45526,
+  "duplicate_count": 0,
+  "expected_reference_count": 677,
+  "fetched_at": "2026-10-29T07:42:48.590373+00:00",
+  "fields": [
+    "model",
+    "type",
+    "status",
+    "version"
+  ],
+  "raw_count": 48099,
+  "raw_sha256": "80c57341e64b2f7a8f2cf4d50daba61526d88a4b76dc31038807e268b70a1c7a",
+  "schema_version": 1,
+  "snapshot_sha256": "dfa44049aa2bb2bac5d6c7b23a60f73c9bf48b2b72a54bb46b32e95787b36c85",
+  "sort": [
+    "model",
+    "version",
+    "type",
+    "status"
+  ],
+  "source_url": "https://miot-spec.org/miot-spec-v2/instances?status=all",
+  "status_counts": {
+    "debug": 31420,
+    "preview": 572,
+    "released": 16107
+  },
+  "unique_count": 48099,
+  "unique_models": 46203
+}
