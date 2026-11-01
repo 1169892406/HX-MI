@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "fixture": "chuangmi.plug.m3.json",
+      "model": "urn:miot-spec-v2:device:outlet:0000A002:chuangmi-m3:1",
+      "bindings": 2,
+      "capabilities": [
+        "switch"
+      ],
+      "properties": [
+        "switch.on"
+      ],
+      "actions": [],
+      "events": []
+    },
+    {
+      "fixture": "cnhdm.airrtc.wkq01.json",
+      "model": "urn:miot-spec-v2:device:thermostat:0000A031:cnhdm-wkq01:1",
+      "bindings": 3,
+      "capabilities": [
+        "air_quality",
+        "climate",
+        "switch"
+      ],
+      "properties": [
+        "climate.mode",
+        "climate.power"
+      ],
+      "actions": [],
+      "events": []
+    },
+    {
+      "fixture": "xiaomi.aircondition.ma2.json",
+      "model": "urn:miot-spec-v2:device:air-conditioner:0000A004:xiaomi-ma2:3",
+      "bindings": 2,
+      "capabilities": [
+        "air_quality",
+        "climate"
+      ],
+      "properties": [
+        "climate.mode",
+        "climate.power"
+      ],
+      "actions": [],
+      "events": []
+    },
+    {
+      "fixture": "xiaomi.airp.mb5.json",
+      "model": "urn:miot-spec-v2:device:air-purifier:0000A007:xiaomi-mb5:1:0000D050",
+      "bindings": 4,
+      "capabilities": [
+        "air_quality",
+        "fan",
+        "switch"
+      ],
+      "properties": [
+        "fan.on",
+        "fan.preset_mode",
+        "switch.on"
+      ],
+      "actions": [
+        "fan.toggle"
+      ],
+      "events": []
+    }
+  ],
+  "differences": [
+    {
+      "fixture": "cnhdm.airrtc.wkq01.json",
+      "field": "capabilities",
+      "old": [
+        "climate",
+        "sensor",
+        "switch"
+      ],
+      "new": [
+        "air_quality",
+        "climate",
+        "switch"
+      ]
+    },
+    {
+      "fixture": "xiaomi.aircondition.ma2.json",
+      "field": "capabilities",
+      "old": [
+        "climate",
+        "sensor"
+      ],
+      "new": [
+        "air_quality",
+        "climate"
+      ]
+    },
+    {
+      "fixture": "xiaomi.airp.mb5.json",
+      "field": "bindings",
+      "old": 6,
+      "new": 4
+    },
+    {
+      "fixture": "xiaomi.airp.mb5.json",
+      "field": "capabilities",
+      "old": [
+        "fan",
+        "sensor",
+        "switch"
+      ],
+      "new": [
+        "air_quality",
+        "fan",
+        "switch"
+      ]
+    }
+  ],
+  "whitelist": [
+    {
+      "field": "capabilities",
+      "fixture": "cnhdm.airrtc.wkq01.json",
+      "reason": "空气质量属性升级为独立air_quality能力"
+    },
+    {
+      "field": "capabilities",
+      "fixture": "xiaomi.aircondition.ma2.json",
+      "reason": "空气质量属性升级为独立air_quality能力"
+    },
+    {
+      "field": "bindings",
+      "fixture": "xiaomi.airp.mb5.json",
+      "reason": "新映射合并同类sensor实例为air_quality"
+    },
+    {
+      "field": "capabilities",
+      "fixture": "xiaomi.airp.mb5.json",
+      "reason": "空气质量属性升级为独立air_quality能力"
+    }
+  ]
+}

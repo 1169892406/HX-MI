@@ -1,0 +1,744 @@
+{
+  "_comment": "MIoT service 短名 → HOMEX §7.2 标准能力。数据化以便热更与逐条评审。",
+  "_note": "只做品类级（GLOBAL_CONVERTERS 那 31 组），型号级定制按报障增量，不一次搬 677 条。",
+  "version": 1,
+  "services": [
+    {
+      "match": [
+        "light",
+        "night_light",
+        "ambient_light",
+        "plant_light",
+        "light_bath_heater"
+      ],
+      "capability": "light",
+      "props": {
+        "on": "on",
+        "switch": "on",
+        "brightness": "brightness",
+        "color_temperature": "color_temp_kelvin",
+        "color_temp": "color_temp_kelvin",
+        "color": "color_hex",
+        "mode": "effect"
+      },
+      "actions": {
+        "turn_on": {
+          "set": "on",
+          "value": true
+        },
+        "turn_off": {
+          "set": "on",
+          "value": false
+        },
+        "toggle": {
+          "toggle": "on"
+        },
+        "set_brightness": {
+          "set": "brightness",
+          "from_param": "value"
+        },
+        "set_color_temp": {
+          "set": "color_temperature",
+          "from_param": "kelvin"
+        },
+        "set_color": {
+          "set": "color",
+          "from_param": "hex",
+          "encode": "rgb_int"
+        },
+        "set_effect": {
+          "set": "mode",
+          "from_param": "effect",
+          "encode": "enum_desc"
+        }
+      }
+    },
+    {
+      "match": [
+        "switch",
+        "outlet",
+        "massager",
+        "towel_rack",
+        "diffuser",
+        "fish_tank",
+        "pet_drinking_fountain",
+        "mosquito_dispeller",
+        "electric_blanket",
+        "foot_bath"
+      ],
+      "capability": "switch",
+      "props": {
+        "on": "on",
+        "switch": "on"
+      },
+      "actions": {
+        "turn_on": {
+          "set": "on",
+          "value": true
+        },
+        "turn_off": {
+          "set": "on",
+          "value": false
+        },
+        "toggle": {
+          "toggle": "on"
+        }
+      }
+    },
+    {
+      "match": [
+        "fan",
+        "ceiling_fan",
+        "air_fresh",
+        "air_purifier",
+        "hood"
+      ],
+      "capability": "fan",
+      "props": {
+        "on": "on",
+        "fan_level": "percentage",
+        "speed_level": "percentage",
+        "stepless_fan_level": "percentage",
+        "mode": "preset_mode",
+        "horizontal_swing": "oscillating",
+        "vertical_swing": "oscillating"
+      },
+      "actions": {
+        "turn_on": {
+          "set": "on",
+          "value": true
+        },
+        "turn_off": {
+          "set": "on",
+          "value": false
+        },
+        "toggle": {
+          "toggle": "on"
+        },
+        "set_percentage": {
+          "set": "fan_level",
+          "from_param": "percentage"
+        },
+        "oscillate": {
+          "set": "horizontal_swing",
+          "from_param": "oscillating"
+        },
+        "set_preset_mode": {
+          "set": "mode",
+          "from_param": "preset_mode",
+          "encode": "enum_desc"
+        }
+      }
+    },
+    {
+      "match": [
+        "air_conditioner",
+        "heater",
+        "thermostat",
+        "ptc_bath_heater"
+      ],
+      "capability": "climate",
+      "props": {
+        "on": "power",
+        "mode": "mode",
+        "target_temperature": "target_temp_c",
+        "indoor_temperature": "current_temp_c",
+        "temperature": "current_temp_c",
+        "relative_humidity": "current_humidity",
+        "humidity": "current_humidity",
+        "fan_level": "fan_mode",
+        "heat_level": "fan_mode",
+        "horizontal_swing": "swing_mode",
+        "vertical_swing": "swing_mode"
+      },
+      "actions": {
+        "turn_on": {
+          "set": "on",
+          "value": true
+        },
+        "turn_off": {
+          "set": "on",
+          "value": false
+        },
+        "set_mode": {
+          "set": "mode",
+          "from_param": "mode",
+          "encode": "climate_mode"
+        },
+        "set_temperature": {
+          "set": "target_temperature",
+          "from_param": "target_temp_c"
+        },
+        "set_fan_mode": {
+          "set": "fan_level",
+          "from_param": "fan_mode",
+          "encode": "fan_mode"
+        },
+        "set_swing_mode": {
+          "set": "vertical_swing",
+          "from_param": "swing_mode",
+          "encode": "swing_mode"
+        }
+      }
+    },
+    {
+      "match": [
+        "airer",
+        "curtain",
+        "window_opener",
+        "motor_controller"
+      ],
+      "capability": "cover",
+      "props": {
+        "current_position": "position",
+        "target_position": "position",
+        "motor_control": "moving"
+      },
+      "actions": {
+        "open": {
+          "set": "target_position",
+          "value": 100
+        },
+        "close": {
+          "set": "target_position",
+          "value": 0
+        },
+        "stop": {
+          "set": "motor_control",
+          "value": false
+        },
+        "set_position": {
+          "set": "target_position",
+          "from_param": "position"
+        }
+      }
+    },
+    {
+      "match": [
+        "camera_control",
+        "video_doorbell"
+      ],
+      "capability": "camera",
+      "props": {
+        "on": "streaming",
+        "switch": "streaming",
+        "motion_detection": "motion_detection"
+      },
+      "actions": {
+        "turn_on": {
+          "set": "on",
+          "value": true
+        },
+        "turn_off": {
+          "set": "on",
+          "value": false
+        },
+        "enable_motion": {
+          "set": "motion_detection",
+          "value": true
+        },
+        "disable_motion": {
+          "set": "motion_detection",
+          "value": false
+        }
+      }
+    },
+    {
+      "match": [
+        "vacuum"
+      ],
+      "capability": "vacuum",
+      "props": {
+        "status": "state",
+        "battery_level": "battery_level",
+        "fan_level": "fan_speed"
+      },
+      "actions": {
+        "start_clean": {
+          "action": "start_sweep"
+        },
+        "pause": {
+          "action": "stop_sweeping"
+        },
+        "return_home": {
+          "action": "start_charge"
+        },
+        "set_fan_speed": {
+          "action": "set_suction_grade",
+          "from_param": "fan_speed"
+        }
+      }
+    },
+    {
+      "match": [
+        "lock",
+        "door_lock"
+      ],
+      "capability": "lock",
+      "props": {
+        "on": "locked",
+        "lock_state": "locked",
+        "jammed": "jammed",
+        "battery_level": "battery"
+      },
+      "actions": {
+        "lock": {
+          "set": "on",
+          "value": true
+        },
+        "unlock": {
+          "set": "on",
+          "value": false
+        }
+      }
+    },
+    {
+      "match": [
+        "indicator_light"
+      ],
+      "capability": "switch",
+      "props": {
+        "on": "on"
+      },
+      "actions": {
+        "turn_on": {
+          "set": "on",
+          "value": true
+        },
+        "turn_off": {
+          "set": "on",
+          "value": false
+        },
+        "toggle": {
+          "toggle": "on"
+        }
+      },
+      "note": "指示灯不是照明设备。映射为 switch 而不是 light：用户要的是\"关掉指示灯\"，不需要调光候选。"
+    },
+    {
+      "match": [
+        "alarm"
+      ],
+      "capability": "switch",
+      "props": {
+        "alarm": "on"
+      },
+      "actions": {
+        "turn_on": {
+          "set": "alarm",
+          "value": true
+        },
+        "turn_off": {
+          "set": "alarm",
+          "value": false
+        },
+        "toggle": {
+          "toggle": "alarm"
+        }
+      },
+      "note": "报警开关；标为 config 类别（不该出现在主控台最显眼处）"
+    },
+    {
+      "match": [
+        "physical_control_locked",
+        "physical_controls_locked"
+      ],
+      "capability": "switch",
+      "props": {
+        "physical_control_locked": "on",
+        "physical_controls_locked": "on"
+      },
+      "actions": {
+        "turn_on": {
+          "set": "physical_control_locked",
+          "value": true
+        },
+        "turn_off": {
+          "set": "physical_control_locked",
+          "value": false
+        }
+      },
+      "note": "童锁"
+    },
+    {
+      "match": [
+        "speaker"
+      ],
+      "capability": "media_player",
+      "props": {
+        "volume": "volume_level",
+        "mute": "muted"
+      },
+      "actions": {
+        "volume_set": {
+          "set": "volume",
+          "from_param": "volume_level"
+        },
+        "mute": {
+          "set": "mute",
+          "value": true
+        },
+        "turn_on": {
+          "set": "mute",
+          "value": false
+        },
+        "turn_off": {
+          "set": "mute",
+          "value": true
+        }
+      },
+      "note": "真实 speaker spec（xiaomi.wifispeaker.lx06）只有 volume/mute 两个可写属性；播放控制走 play-control 的 action，首期只实现音量与静音（媒体源控制需 MIoT action 带参，M1 未实现）"
+    }
+  ],
+  "sensor_services": [
+    {
+      "match": [
+        "environment"
+      ],
+      "capability": "sensor",
+      "props": {
+        "temperature": {
+          "prop": "value",
+          "device_class": "temperature",
+          "unit": "°C"
+        },
+        "relative_humidity": {
+          "prop": "value",
+          "device_class": "humidity",
+          "unit": "%"
+        },
+        "pm25_density": {
+          "prop": "value",
+          "device_class": "pm25",
+          "unit": "μg/m³"
+        },
+        "pm10_density": {
+          "prop": "value",
+          "device_class": "pm10",
+          "unit": "μg/m³"
+        },
+        "co2_density": {
+          "prop": "value",
+          "device_class": "co2",
+          "unit": "ppm"
+        },
+        "tvoc_density": {
+          "prop": "value",
+          "device_class": "tvoc",
+          "unit": "μg/m³"
+        },
+        "illumination": {
+          "prop": "value",
+          "device_class": "illuminance",
+          "unit": "lx"
+        },
+        "battery_level": {
+          "prop": "value",
+          "device_class": "battery",
+          "unit": "%"
+        }
+      },
+      "note": "环境服务按属性拆成多个 sensor 实例（每个属性一个能力实例）"
+    },
+    {
+      "match": [
+        "battery"
+      ],
+      "capability": "sensor",
+      "props": {
+        "battery_level": {
+          "prop": "value",
+          "device_class": "battery",
+          "unit": "%"
+        }
+      }
+    },
+    {
+      "match": [
+        "tds_sensor"
+      ],
+      "capability": "sensor",
+      "props": {
+        "tds_in": {
+          "prop": "value",
+          "device_class": "tds",
+          "unit": "ppm"
+        },
+        "tds_out": {
+          "prop": "value",
+          "device_class": "tds",
+          "unit": "ppm"
+        }
+      }
+    },
+    {
+      "match": [
+        "motion_sensor",
+        "occupancy_sensor"
+      ],
+      "capability": "binary_sensor",
+      "props": {
+        "motion_state": {
+          "prop": "on",
+          "device_class": "motion"
+        },
+        "occupancy_status": {
+          "prop": "on",
+          "device_class": "occupancy"
+        }
+      }
+    },
+    {
+      "match": [
+        "door_sensor",
+        "contact_sensor"
+      ],
+      "capability": "binary_sensor",
+      "props": {
+        "contact_state": {
+          "prop": "on",
+          "device_class": "door"
+        }
+      }
+    },
+    {
+      "match": [
+        "water_leak_sensor",
+        "leak_sensor"
+      ],
+      "capability": "binary_sensor",
+      "props": {
+        "water_leak": {
+          "prop": "on",
+          "device_class": "moisture"
+        }
+      }
+    },
+    {
+      "match": [
+        "gas_sensor"
+      ],
+      "capability": "binary_sensor",
+      "props": {
+        "status": {
+          "prop": "on",
+          "device_class": "gas"
+        },
+        "gas_concentration": {
+          "prop": "value",
+          "device_class": "gas",
+          "unit": "ppm"
+        }
+      },
+      "note": "真实 lumi.sensor_gas.mcn02 的属性是 status(uint8) 与 gas_concentration(float)，不是 gas/smoke。首版按参考实现的命名猜，导致整台设备映射为 0 能力。"
+    },
+    {
+      "match": [
+        "smoke_sensor"
+      ],
+      "capability": "binary_sensor",
+      "props": {
+        "smoke": {
+          "prop": "on",
+          "device_class": "smoke"
+        },
+        "smoke_concentration": {
+          "prop": "value",
+          "device_class": "smoke"
+        }
+      }
+    },
+    {
+      "match": [
+        "health_pot"
+      ],
+      "capability": "sensor",
+      "props": {
+        "status": {
+          "prop": "value",
+          "device_class": "enum"
+        },
+        "left_time": {
+          "prop": "left_time",
+          "unit": "s"
+        },
+        "temperature": {
+          "prop": "temperature",
+          "unit": "°C"
+        }
+      },
+      "note": "健康壶/电炖锅。HOMEX 无烹饪类标准能力，降级为只读 sensor（状态/剩余时间/温度）；不提供启动烹饪的控制（食谱参数复杂且各厂商差异大，误操作有安全风险）。"
+    }
+  ],
+  "air_quality_services": [
+    {
+      "match": [
+        "air_quality",
+        "environment"
+      ],
+      "capability": "air_quality",
+      "props": {
+        "pm25_density": "pm25",
+        "pm10_density": "pm10",
+        "co2_density": "co2_ppm",
+        "tvoc_density": "tvoc_ppb",
+        "aqi": "aqi"
+      }
+    }
+  ],
+  "degradations": [
+    {
+      "service": [
+        "humidifier",
+        "dehumidifier"
+      ],
+      "to": [
+        "switch",
+        "sensor",
+        "number"
+      ],
+      "reason": "HOMEX 20 项标准能力无 humidifier。降级为：开关（on）+ 湿度传感器（relative_humidity）+ 目标湿度数值（target_humidity）。用户仍能开关、看湿度、设目标，只是界面不显示为「加湿器」。",
+      "mapping": {
+        "switch": {
+          "props": {
+            "on": "on"
+          },
+          "actions": {
+            "turn_on": {
+              "set": "on",
+              "value": true
+            },
+            "turn_off": {
+              "set": "on",
+              "value": false
+            }
+          }
+        },
+        "sensor": {
+          "props": {
+            "relative_humidity": {
+              "prop": "value",
+              "device_class": "humidity",
+              "unit": "%"
+            }
+          }
+        },
+        "number": {
+          "props": {
+            "target_humidity": {
+              "prop": "value",
+              "unit": "%",
+              "min": 0,
+              "max": 100,
+              "step": 1
+            }
+          },
+          "actions": {
+            "set_value": {
+              "set": "target_humidity",
+              "from_param": "value"
+            }
+          }
+        }
+      }
+    },
+    {
+      "service": [
+        "water_heater"
+      ],
+      "to": [
+        "climate",
+        "sensor"
+      ],
+      "reason": "HOMEX 无 water_heater。降级为 climate（用 mode/target_temp 表达加热与目标温度）+ sensor（当前水温）。用户能设温度、看水温。",
+      "mapping": {
+        "climate": {
+          "props": {
+            "on": "power",
+            "mode": "mode",
+            "target_temperature": "target_temp_c",
+            "temperature": "current_temp_c"
+          },
+          "actions": {
+            "turn_on": {
+              "set": "on",
+              "value": true
+            },
+            "turn_off": {
+              "set": "on",
+              "value": false
+            },
+            "set_temperature": {
+              "set": "target_temperature",
+              "from_param": "target_temp_c"
+            }
+          }
+        },
+        "sensor": {
+          "props": {
+            "temperature": {
+              "prop": "value",
+              "device_class": "temperature",
+              "unit": "°C"
+            }
+          }
+        }
+      }
+    },
+    {
+      "service": [
+        "remote",
+        "ir_remote"
+      ],
+      "to": [
+        "button"
+      ],
+      "reason": "HOMEX 无 remote。红外遥控的按键语义可用 button 表达（每个按键一个实例），但无法表达「学习红外码」——那需要 python-miio（GPL-3.0），我们不做。",
+      "mapping": {
+        "button": {
+          "props": {},
+          "actions": {
+            "press": {
+              "action": "play_ir_code"
+            }
+          }
+        }
+      }
+    },
+    {
+      "service": [
+        "alarm_control_panel"
+      ],
+      "to": [
+        "binary_sensor"
+      ],
+      "reason": "HOMEX 无 alarm_control_panel，且首期不支持布防/撤防。只读报警状态（有报警/无报警），不提供控制。",
+      "mapping": {
+        "binary_sensor": {
+          "props": {
+            "alarm": {
+              "prop": "on",
+              "device_class": "safety"
+            }
+          }
+        }
+      }
+    },
+    {
+      "service": [
+        "device_tracker"
+      ],
+      "to": [],
+      "reason": "HOMEX 无 device_tracker，且位置追踪属隐私敏感能力，首期不支持。显式列在此处而不是静默丢弃，便于后续评审。",
+      "mapping": {}
+    },
+    {
+      "service": [
+        "time"
+      ],
+      "to": [],
+      "reason": "时间设置不是设备能力（是配置项），不进能力面。",
+      "mapping": {}
+    }
+  ]
+}

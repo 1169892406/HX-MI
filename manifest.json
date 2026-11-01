@@ -1,0 +1,282 @@
+{
+  "schema_version": 2,
+  "plugin_id": "homex.xiaomi_miot",
+  "name": "HX-MI",
+  "version": "2.0.0-alpha.43",
+  "publisher": {
+    "id": "homex",
+    "display_name": "HOMEX Official",
+    "homepage": "https://homex.dev"
+  },
+  "type": "device_driver",
+  "runtime": "wasm",
+  "api_version": "2",
+  "scope": "household",
+  "description": "由 8090 插件宿主加载的 HX-MI ABI v2 迁移候选；不监听独立端口。",
+  "permissions": [
+    "config.read",
+    "network.outbound",
+    "network.datagram",
+    "network.mqtt",
+    "driver.register",
+    "secret.read",
+    "storage.read",
+    "storage.write",
+    "schedule.create",
+    "migration.read",
+    "cookie.ticket",
+    "secret.blob",
+    "migration.device_secret"
+  ],
+  "entry": {
+    "wasm": "plugin.wasm"
+  },
+  "provides": {
+    "tools": [
+      {
+        "name": "regions",
+        "risk": "low"
+      },
+      {
+        "name": "login",
+        "risk": "high"
+      },
+      {
+        "name": "captcha",
+        "risk": "medium"
+      },
+      {
+        "name": "captcha_image",
+        "risk": "low"
+      },
+      {
+        "name": "verify",
+        "risk": "high"
+      },
+      {
+        "name": "verify_web",
+        "risk": "high"
+      },
+      {
+        "name": "status",
+        "risk": "low"
+      },
+      {
+        "name": "logout",
+        "risk": "medium"
+      },
+      {
+        "name": "account",
+        "risk": "low"
+      },
+      {
+        "name": "settings",
+        "risk": "medium"
+      },
+      {
+        "name": "sync_now",
+        "risk": "medium"
+      },
+      {
+        "name": "accounts",
+        "risk": "low"
+      },
+      {
+        "name": "account_settings",
+        "risk": "medium",
+        "scope": "account"
+      },
+      {
+        "name": "account_sync",
+        "risk": "medium",
+        "scope": "account"
+      },
+      {
+        "name": "account_delete",
+        "risk": "high",
+        "scope": "account"
+      },
+      {
+        "name": "catalog_status",
+        "risk": "low"
+      },
+      {
+        "name": "catalog_refresh",
+        "risk": "medium"
+      },
+      {
+        "name": "lan_health",
+        "risk": "low"
+      }
+    ],
+    "drivers": [
+      {
+        "name": "xiaomi_miot",
+        "capabilities": [
+          "sensor",
+          "switch",
+          "light",
+          "climate",
+          "cover"
+        ],
+        "discovery": true
+      }
+    ],
+    "background": true
+  },
+  "resources": {
+    "udp": {
+      "ports": [
+        54321
+      ],
+      "max_payload_bytes": 4096,
+      "rate_per_second": 20
+    },
+    "mqtt": {
+      "topics": [
+        "homex/{hh}/"
+      ],
+      "qos": 1,
+      "retain": true
+    },
+    "filesystem": {
+      "quota_kb": 4096,
+      "max_file_kb": 1024
+    },
+    "background": {
+      "max_tasks": 8,
+      "min_interval_ms": 200
+    },
+    "http": {
+      "cookie_exports": [
+        {
+          "host": "account.xiaomi.com",
+          "names": [
+            "passToken",
+            "userId",
+            "cUserId"
+          ],
+          "secret_key": "xiaomi_account"
+        },
+        {
+          "host": "sts.api.io.mi.com",
+          "names": [
+            "serviceToken",
+            "userId",
+            "cUserId"
+          ],
+          "secret_key": "xiaomi_service",
+          "alias": {
+            "yetAnotherServiceToken": "serviceToken"
+          }
+        },
+        {
+          "host": "api.io.mi.com",
+          "names": [
+            "serviceToken",
+            "userId",
+            "cUserId"
+          ],
+          "secret_key": "xiaomi_service",
+          "alias": {
+            "yetAnotherServiceToken": "serviceToken"
+          }
+        }
+      ]
+    },
+    "migrations": [
+      {
+        "name": "hx_mi_legacy",
+        "secret_keys": [
+          "miio_token"
+        ]
+      }
+    ],
+    "secrets": {
+      "blobs": [
+        {
+          "key": "xiaomi_session_material",
+          "max_bytes": 4096,
+          "scope": "household",
+          "rotatable": true
+        },
+        {
+          "key": "miio_token",
+          "max_bytes": 64,
+          "scope": "device",
+          "rotatable": true
+        }
+      ]
+    }
+  },
+  "secrets": [
+    {
+      "key": "accounts_master_key",
+      "required": true,
+      "rotate": false,
+      "description": "HX-MI 账号与 vault 主密钥"
+    }
+  ],
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "region": {
+        "type": "string",
+        "default": "cn"
+      },
+      "sync_interval_seconds": {
+        "type": "integer",
+        "minimum": 60,
+        "maximum": 86400,
+        "default": 300
+      },
+      "polling_enabled": {
+        "type": "boolean",
+        "default": true,
+        "title": "自动同步",
+        "description": "关闭后不再后台轮询云端设备列表（手动同步仍可用）。"
+      },
+      "device_filter_models": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "title": "设备型号过滤",
+        "description": "非空时只同步 model 以这些前缀开头的设备；留空同步全部。"
+      }
+    }
+  },
+  "limits": {
+    "max_memory_mb": 128,
+    "execution_timeout_ms": 10000,
+    "max_storage_kb": 4096
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "REPLACE_WITH_YOUR_KEY_ID",
+    "value": ""
+  },
+  "changelog": "2.0.0-alpha.42: hot-deploy verification. Deployed purely through the new hot-deploy path (drop package into plugin directory, platform hot-installs, service never restarts).",
+  "tools": [
+    "regions",
+    "login",
+    "captcha",
+    "captcha_image",
+    "verify",
+    "verify_web",
+    "status",
+    "logout",
+    "account",
+    "settings",
+    "sync_now",
+    "accounts",
+    "account_settings",
+    "account_sync",
+    "account_delete",
+    "catalog_status",
+    "catalog_refresh",
+    "lan_health"
+  ]
+}
