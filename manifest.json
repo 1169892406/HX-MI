@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.43",
+  "version": "2.0.0-alpha.44",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -255,7 +255,7 @@
   },
   "signature": {
     "algorithm": "ed25519",
-    "key_id": "REPLACE_WITH_YOUR_KEY_ID",
+    "key_id": "hx-mi-community",
     "value": ""
   },
   "changelog": "2.0.0-alpha.42: hot-deploy verification. Deployed purely through the new hot-deploy path (drop package into plugin directory, platform hot-installs, service never restarts).",
