@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.49",
+  "version": "2.0.0-alpha.50",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -258,7 +258,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.49：**默认改用平台通用表单**（配置项已由平台 selector 能力完整表达：区域用 regions 工具做动态下拉、同步间隔用滑块、设备过滤用列表输入）；自带界面**保留**为备用（页头「切换到插件原生界面」），因为账号登录/验证码是多步流程，通用表单表达不了。动作类能力（状态/账号列表/目录刷新/局域网探测/立即同步）由平台的「插件操作」区块自动生成按钮。",
+  "changelog": "2.0.0-alpha.50：**修原生界面多处\"业务失败被静默\"** —— 平台把 `/invoke/` 的两种结果都翻译成帧内形状（成功=data 本体；业务失败={ok:false,kind,message}，HTTP 200），而本界面多处只认成功形状：① 账号列表卡在「读取中」；② 同步结果不显示失败原因；③ 设备目录/局域网探测把失败说成空数据；④ 登录失败被说成\"已提交\"。现在统一经 `failed()` / `failText()` 判定，失败原因如实显示。",
   "tools": [
     "regions",
     "login",

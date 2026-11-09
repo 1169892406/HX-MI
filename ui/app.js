@@ -180,6 +180,28 @@
 
   function clearBanner() { el('banner').hidden = true; scheduleHeight(); }
 
+  /**
+   * 平台把 `/invoke/` 的两种结果都翻译成帧内形状：
+   *   · 成功     → `data` 本体
+   *   · 业务失败 → `{ok:false, kind, message}`（**200**，不是 HTTP 错误）
+   *
+   * 所以每个 `.then(res => ...)` 都必须先过这一关。旧代码多处只认成功形状，
+   * 结果把"插件报告的业务失败"静默当成"没有数据"（2026-11-09 实测：
+   * 账号列表卡在读取中 / 同步结果不显示原因）。
+   */
+  function failed(res) {
+    return !!(res && res.ok === false);
+  }
+
+  /** 把失败帧转成一句可读的话（含 kind，便于排障）。 */
+  function failText(res) {
+    if (!res) return '插件未返回内容';
+    var msg = res.message || '';
+    var kind = res.kind || '';
+    if (msg && kind) return msg + '（' + kind + '）';
+    return msg || kind || '插件未说明原因';
+  }
+
   function errText(e) {
     if (!e) return '未知错误';
     return (e.code ? e.code + '：' : '') + (e.message || String(e));
@@ -223,6 +245,28 @@
 
   function renderAccounts(data) {
     var box = el('accounts');
+    /*
+     * ⚠ 必须处理业务失败帧（2026-11-09 实测「账号列表卡在读取中」）。
+     *
+     * 平台把 `/invoke/` 的两种结果都翻译成帧内形状：
+     *   · 成功    → `data` 本体（如 `{accounts:[...]}`）
+     *   · 业务失败 → `{ok:false, kind, message}`（200，不是 HTTP 错误）
+     *
+     * 旧代码只认 `data.accounts`，于是收到失败帧时 `items` 为空数组、
+     * 走进"还没有登录任何小米账号"分支 —— 而**更糟的是**：真实故障
+     * （如"账号主密钥不可用"）被静默说成"没有账号"，用户以为没登录过。
+     *
+     * 现在：失败帧如实显示原因，用户与排障者都能看到真话。
+     */
+    if (data && data.ok === false) {
+      box.innerHTML = '';
+      var errP = document.createElement('p');
+      errP.className = 'banner banner--err';
+      errP.textContent = '读取账号失败：' + (data.message || data.kind || '插件未说明原因');
+      box.appendChild(errP);
+      scheduleHeight();
+      return;
+    }
     var items = (data && data.accounts) || [];
     var names = (data && data.account_names) || {};
     if (!items.length) {
@@ -312,6 +356,13 @@
       .then(function (res) {
         // 提交后立刻清掉密码：既然已经交给宿主，本页不该再留着它。
         el('f-pass').value = '';
+        // 业务失败帧（如"密码错误"）必须如实显示 —— 静默会把失败说成"已提交"。
+        if (failed(res)) {
+          el('login-hint').hidden = false;
+          el('login-hint').textContent = '登录失败：' + failText(res);
+          scheduleHeight();
+          return;
+        }
         sessionId = (res && res.session_id) || '';
         var state = (res && res.state) || '';
         el('login-hint').hidden = false;
@@ -359,8 +410,16 @@
   function loadCaptchaImage() {
     rpc('plugin.tool.call', { tool: 'captcha_image', args: { session_id: sessionId } })
       .then(function (res) {
+        if (failed(res)) {
+          el('ch-img').hidden = true;
+          showBanner('取验证码图片失败：' + failText(res), 'err');
+          return;
+        }
         var b64 = (res && (res.image_base64 || res.image)) || '';
-        if (!b64) return;
+        if (!b64) {
+          showBanner('插件没有返回验证码图片', 'warn');
+          return;
+        }
         var img = el('ch-img');
         img.src = b64.indexOf('data:') === 0 ? b64 : 'data:image/png;base64,' + b64;
         img.hidden = false;
@@ -376,6 +435,11 @@
     rpc('plugin.tool.call', { tool: 'verify', args: { session_id: sessionId, code: code } })
       .then(function (res) {
         el('f-code').value = '';
+        if (failed(res)) {
+          showBanner('验证失败：' + failText(res), 'err');
+          scheduleHeight();
+          return;
+        }
         refreshChallenge((res && res.state) || '');
       })
       .catch(function (e) { showBanner('验证失败：' + errText(e), 'err'); })
@@ -403,9 +467,14 @@
       .then(function (res) {
         var h = el('sync-hint');
         h.hidden = false;
-        h.textContent = res && res.state === 'succeeded'
-          ? '同步完成：' + JSON.stringify(res.summary || {})
-          : '同步失败：' + ((res && res.error) || '原因未提供');
+        // 业务失败帧与"状态不是 succeeded"是两件不同的事，都要如实说。
+        if (failed(res)) {
+          h.textContent = '同步失败：' + failText(res);
+        } else if (res && res.state === 'succeeded') {
+          h.textContent = '同步完成：' + JSON.stringify(res.summary || {});
+        } else {
+          h.textContent = '同步失败：' + ((res && res.error) || '原因未提供');
+        }
         scheduleHeight();
       })
       .catch(function (e) { showBanner('同步失败：' + errText(e), 'err'); })
@@ -416,7 +485,12 @@
 
   function loadCatalogStatus() {
     rpc('plugin.tool.call', { tool: 'catalog_status', args: {} })
-      .then(function (r) { el('catalog-out').textContent = JSON.stringify(r, null, 2); scheduleHeight(); })
+      .then(function (r) {
+        el('catalog-out').textContent = failed(r)
+          ? '读取失败：' + failText(r)
+          : JSON.stringify(r, null, 2);
+        scheduleHeight();
+      })
       .catch(function (e) { el('catalog-out').textContent = '读取失败：' + errText(e); scheduleHeight(); });
   }
 
@@ -424,7 +498,9 @@
     el('btn-catalog-refresh').disabled = true;
     rpc('plugin.tool.call', { tool: 'catalog_refresh', args: {} })
       .then(function (r) {
-        el('catalog-out').textContent = '刷新完成：' + JSON.stringify(r, null, 2);
+        el('catalog-out').textContent = failed(r)
+          ? '刷新失败：' + failText(r)
+          : '刷新完成：' + JSON.stringify(r, null, 2);
         scheduleHeight();
       })
       .catch(function (e) { el('catalog-out').textContent = '刷新失败：' + errText(e); scheduleHeight(); })
@@ -434,7 +510,12 @@
   function runLanHealth() {
     el('btn-lan-health').disabled = true;
     rpc('plugin.tool.call', { tool: 'lan_health', args: {} })
-      .then(function (r) { el('lan-out').textContent = JSON.stringify(r, null, 2); scheduleHeight(); })
+      .then(function (r) {
+        el('lan-out').textContent = failed(r)
+          ? '探测失败：' + failText(r)
+          : JSON.stringify(r, null, 2);
+        scheduleHeight();
+      })
       .catch(function (e) { el('lan-out').textContent = '探测失败：' + errText(e); scheduleHeight(); })
       .then(function () { el('btn-lan-health').disabled = false; });
   }
