@@ -202,5 +202,12 @@
     </div>
   </section>
 </div>
+
+<!-- ⚠ 这一行不能少（2026-11-10 踩过）：
+     重写 index.html 时漏掉它，页面会"看起来正常"（HTML/CSS 都在、也没有报错），
+     但**脚本从没运行** —— 表现是账号列表永远停在「读取中…」、返回按钮点不动、
+     同步区全空，而且控制台一条错误都没有（没有脚本，自然没有报错）。
+     闸门 check-ui-handshake.mjs 已加断言钉住"index.html 必须引用 app.js"。 -->
+<script src="app.js"></script>
 </body>
 </html>

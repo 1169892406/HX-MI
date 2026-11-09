@@ -31,6 +31,7 @@ const APP_JS = path.join(HERE, '..', 'ui', 'app.js');
 const PLATFORM_HX = 1;
 
 let failed = 0;
+const HTML = fs.readFileSync(path.join(HERE, '..', 'ui', 'index.html'), 'utf8');
 const ok = (name, cond, detail) => {
   if (cond) console.log(`  ✔ ${name}`);
   else {
@@ -100,6 +101,25 @@ const fakePort = {
   postMessage(m) { posted.push(m); }, start() {},
   set onmessage(fn) { portHandler = fn; }, get onmessage() { return portHandler; },
 };
+
+// ③ 页面**真的会加载**这份脚本吗（2026-11-10 踩过）。
+//
+// # 为什么这条必须单独断言
+//
+// 前面的行为级断言是直接 `new Function(app.js)` 跑的 —— 它能证明"脚本本身没问题"，
+// 但**证明不了页面会加载它**。重写 index.html 时漏掉 `<script src="app.js">`，
+// 页面照样"看起来正常"：HTML/CSS 都在、控制台一条错误都没有，而脚本从没运行 ——
+// 表现是账号列表永远停在「读取中…」、返回按钮点不动、同步区全空。
+// 用户实测就是这个形态；我这个闸门当时全绿。
+{
+  const hasScript = /<script[^>]+src=["']app\.js["'][^>]*>/i.test(HTML);
+  ok('index.html 引用了 app.js', hasScript, '没有 <script src="app.js"> ⇒ 页面永远停在初始占位，且无任何报错');
+  const hasCss = /<link[^>]+href=["']style\.css["'][^>]*>/i.test(HTML);
+  ok('index.html 引用了 style.css', hasCss, '没有样式表 ⇒ 页面会裸奔（功能在但长得像坏了）');
+  // 反向自证：把 script 标签拿掉，判据必须转红。
+  ok(!/<script[^>]+src=["']app\.js["'][^>]*>/i.test(HTML.replace(/<script[^>]+src=["']app\.js["'][^>]*><\/script>/i, '')),
+    '自证：剥掉 script 标签后同一条判据会转红', '否则这条断言只是把今天的写法供起来');
+}
 
 let threw = null;
 try {

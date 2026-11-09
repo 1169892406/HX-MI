@@ -569,15 +569,10 @@
     var cnt = el('sync-count');
     if (cnt) cnt.textContent = bound.length ? bound.length + ' 条同步' : '';
 
-    if (!bound.length) {
-      var p = document.createElement('p');
-      p.className = 'muted small';
-      p.textContent = items.length
-        ? '还没有同步条目。点下面的「＋ 添加同步」把某个账号绑到一个家庭。'
-        : '还没有可同步的账号。先在上面「添加账号」登录一个小米账号。';
-      box.appendChild(p);
-      return;
-    }
+    // 空列表就**留空**（2026-11-10 用户口径：「同步列表空的就应该显示空白」）。
+    // 不写占位文案：入口（＋ 添加同步）就在卡头，空态自己会说话；
+    // 再补一句"还没有…"只是把一行噪音塞进一个本来就该干净的区域。
+    if (!bound.length) return;
     bound.forEach(function (a) {
       var id = a.account_id || '';
       var name = names[id] || a.masked_account || id;
