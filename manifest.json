@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.60",
+  "version": "2.0.0-alpha.61",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -264,7 +264,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.60：① 「同步时间」与「自动同步」移进「添加同步」表单 —— 它们是**这一条**同步的属性（添加时设定），不再是列表上方的共用设置；条目行内显示该条的周期（每 N 分钟）。全局后台任务周期由条目推导：取**最勤快的那条**（一条自动同步都没有则不注册任务）。② 同步结果第 4 格「本次新增」改为「离线设备」，其判据与表格「在线状态」列同一个 online 标志，因此数字与表里数出来的行数一定一致。③ 修一个字段读错：账号返回的是嵌套 sync:{enabled,interval_seconds}，界面此前按扁平 a.sync_enabled 读 —— 永远 undefined，于是每行都显示「关闭」；现在两种形状都认并以嵌套为准。",
+  "changelog": "2.0.0-alpha.61：修**「退出登录后账号列表整块报错、看着像账号丢了」**。① 账号存储密钥与会话解耦：密钥改从专用且**永不删除**的 blob （accounts_key_material）派生；退出登录只清会话，不再带走账号库的钥匙。② openAccountStore 不再因密钥缺席而整块失败 —— accounts.json 是明文元数据，与密钥无关；只有凭据加解密才需要它，那时的错误也会说清是密钥不可用。③ 会话密钥\"不存在\"改为正常状态（no_session）而不是故障：「没登录」是最正常的一种状态，不该让同步结果卡整块报错。账号数据一直都在磁盘上，安装本版后即恢复显示。",
   "tools": [
     "regions",
     "login",

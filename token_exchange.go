@@ -178,6 +178,26 @@ func restoreCloudSession(ctx *plugin.Context) (string, error) {
 	} else {
 		secretBytes, _, e := ctx.VaultBlobOpen(saved.SecretRef)
 		if e != nil {
+			/*
+			 * ## "会话密钥不在"是**正常状态**，不是故障（2026-11-10 修用户实测）
+			 *
+			 * 事故形态：用户点了「退出登录」后，配置页同步结果卡报
+			 *   `读取同步结果失败：PLUGIN_NOT_FOUND: secret blob "xiaomi_session_material" 不存在`
+			 *
+			 * 真身：`logout` 会删掉那份 blob（它本来就是这个用途），但这里把
+			 * "打不开"一律当成故障上抛。于是**退出登录之后**每次读状态都报错 ——
+			 * 而"没登录"恰恰是用户主动造成的最正常的一种状态。
+			 *
+			 * 修法：not-found ⇒ 回 "no_session"（并清掉这份**悬空**的
+			 * cloud-session.json —— 它指向的密钥已经不存在了，留着只会让每次
+			 * 读状态都再撞一次）。其它错误（权限/配额/宿主故障）仍然如实上抛：
+			 * 那些确实不是"没登录"。
+			 */
+			var pe *plugin.Error
+			if errors.As(e, &pe) && pe.Code == plugin.CodeNotFound {
+				_ = ctx.FSRemove("cloud-session.json")
+				return "no_session", nil
+			}
 			return "unreadable", e
 		}
 		if json.Unmarshal(secretBytes, &material) != nil || material.Ssecurity == "" {

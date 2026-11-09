@@ -44,28 +44,122 @@ type accountStore struct {
 	key []byte
 }
 
+/*
+ * ## 账号存储的密钥：与"会话材料"解耦（2026-11-10 修用户实测的数据"消失"）
+ *
+ * # 事故形态
+ *
+ * 用户点了「退出登录」后，配置页报
+ *   `PLUGIN_CALL_FAILED: 账号主密钥不可用（accounts_master_key 未配置，且会话材料不存在）`
+ * 账号列表**整块**读不出来，看起来像"我的账号信息没了"。
+ *
+ * # 真身（两处）
+ *
+ * ① `accounts.json` 是**明文 JSON**（账号列表本身不需要任何密钥），
+ *    密钥只用于 `accounts.secrets/<id>.enc` 里那份**凭据密文**。
+ *    但 `openAccountStore` 在密钥缺席时**直接返回错误**，把"读列表"这件
+ *    不需要密钥的事也一并挡死了。
+ *
+ * ② 密钥的兜底来源是 VaultBlob `xiaomi_session_material` —— 而 `logout`
+ *    会删掉那个 blob（它本来就是这个用途）。于是"退出登录"变成了
+ *    "账号存储密钥永久丢失"：密文再也解不开，且每次读列表都报错。
+ *
+ * # 修法
+ *
+ * · 密钥改从**专用且永不删除**的 blob `accounts_key_material` 派生：
+ *   首次使用时生成一次，之后一直用它。
+ * · 兼容旧数据：专用 blob 不存在时，先按旧来源（主密钥 / 会话材料）派生，
+ *   并把**同一份材料**写进专用 blob —— 密钥值因此不变，既有密文照样能解，
+ *   无需重新加密（避免迁移途中损坏）。
+ * · 密钥确实不可用时（专用 blob 没有、会话材料也没了）**不再阻断账号列表**：
+ *   列表照常读写（明文），只有需要密钥的操作才报明确错误。
+ *
+ * 这样"退出登录"只清会话，不会带走账号存储的钥匙。
+ */
+const accountsKeyBlob = "accounts_key_material"
+
+// openAccountStore 打开账号存储。
+//
+// 注意它**不再因为密钥缺席而失败**：账号列表是明文元数据，与密钥无关。
+// 只有当真的要用密钥（加解密账号凭据）时才会报错 —— 那时的错误也必须说清
+// 是"密钥不可用"，而不是让人以为账号数据没了。
 func openAccountStore(ctx *plugin.Context) (*accountStore, error) {
-	raw, err := ctx.SecretGet("accounts_master_key")
-	if err != nil || strings.TrimSpace(raw) == "" {
-		// ## 主密钥缺席时不要让整个多账号功能瘫掉
-		//
-		// accounts_master_key 是 manifest 声明的 required secret，但部署里可能
-		// 还没填（placeholder）。此时若直接报"账号主密钥不可用"，表现就是
-		// **登录成功、账号却永远加不进去**，而且日志只留一句无害的提示。
-		//
-		// 兜底：用插件已有的保险库里那把会话密钥做 KY 派生材料。它不是新增的
-		// 秘密面（那把钥匙本来就在同一个 HostVault 里），只是让多账号在
-		// "运维忘了填一个字段"时仍能工作。密钥一旦配好，路径自动切回。
-		sec, _, verr := ctx.VaultBlobOpen("xiaomi_session_material")
-		if verr != nil || len(sec) == 0 {
-			return nil, errors.New("账号主密钥不可用（accounts_master_key 未配置，且会话材料不存在）")
-		}
-		raw = "vault-derived:" + sha256Hex(sec)
-		ctx.Log(1, "hx-mi account store using vault-derived key (accounts_master_key not configured)")
+	key, kerr := ensureAccountKey(ctx)
+	if kerr != nil {
+		ctx.LogWarn("hx-mi account secret key unavailable: %v（账号列表仍可读；凭据加解密会报错）", kerr)
+		return &accountStore{ctx: ctx}, nil
 	}
-	key := sha256.Sum256([]byte(raw + "\x00homex.xiaomi_miot/accounts/v2"))
-	return &accountStore{ctx: ctx, key: key[:]}, nil
+	return &accountStore{ctx: ctx, key: key}, nil
 }
+
+// deriveAccountKey 把材料派生成 32 字节密钥（与旧实现逐字一致，保证既有密文可解）。
+func deriveAccountKey(material string) []byte {
+	sum := sha256.Sum256([]byte(material + "\x00homex.xiaomi_miot/accounts/v2"))
+	return sum[:]
+}
+
+// ensureAccountKey 取（必要时建立）账号存储密钥。
+func ensureAccountKey(ctx *plugin.Context) ([]byte, error) {
+	// ① 专用 blob 已存在 ⇒ 直接用它（稳定、与会话无关）。
+	if b, _, err := ctx.VaultBlobOpen(accountsKeyBlob); err == nil && len(b) > 0 {
+		return deriveAccountKey("blob:" + sha256Hex(b)), nil
+	}
+
+	// ② 兼容旧数据：按旧来源派生材料。
+	material := ""
+	if raw, err := ctx.SecretGet("accounts_master_key"); err == nil && strings.TrimSpace(raw) != "" {
+		material = raw
+	} else if sec, _, verr := ctx.VaultBlobOpen("xiaomi_session_material"); verr == nil && len(sec) > 0 {
+		material = "vault-derived:" + sha256Hex(sec)
+	}
+	if material != "" {
+		// 把同一份材料固化进专用 blob：**密钥值不变**，既有密文无需重加密，
+		// 而下次不再依赖主密钥/会话材料。
+		blob := []byte(sha256Hex([]byte(material)))
+		if _, serr := ctx.VaultBlobSeal(accountsKeyBlob, blob); serr != nil {
+			ctx.LogWarn("hx-mi 固化账号密钥材料失败（本次仍可用，下次仍依赖旧来源）: %v", serr)
+		} else {
+			ctx.Log(1, "hx-mi account key material pinned to dedicated blob")
+		}
+		return deriveAccountKey(material), nil
+	}
+
+	// ③ 什么来源都没有：若已有凭据密文，说明密钥丢了 —— 不能凭空造新密钥
+	//    （那会让密文永远解不开，且新写入的会与旧的混在一起），如实报错。
+	if hasAnyAccountSecret(ctx) {
+		return nil, errors.New("账号存储密钥不可用：既有账号凭据无法解密，请重新登录该账号以重建凭据")
+	}
+	// 全新安装：生成一次材料并固化。
+	fresh := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, fresh); err != nil {
+		return nil, err
+	}
+	if _, err := ctx.VaultBlobSeal(accountsKeyBlob, fresh); err != nil {
+		return nil, fmt.Errorf("初始化账号密钥材料失败: %w", err)
+	}
+	ctx.Log(1, "hx-mi account key material created")
+	return deriveAccountKey("blob:" + sha256Hex(fresh)), nil
+}
+
+// hasAnyAccountSecret 报告是否存在任何账号凭据密文。
+//
+// FSList 列的是插件数据根下的全部文件（无子路径参数），所以按前缀过滤。
+// 读不到清单时返回 false：那意味着"看起来没有密文"，于是会走"全新安装"分支
+// 生成新密钥 —— 这个方向的误判代价是"既有密文解不开"，而反过来（明明有密文
+// 却以为没有）会让插件在密钥丢失时凭空造钥、把新旧数据混在一起，更糟。
+func hasAnyAccountSecret(ctx *plugin.Context) bool {
+	files, err := ctx.FSList()
+	if err != nil {
+		return false
+	}
+	for _, f := range files {
+		if strings.HasPrefix(f.Path, "accounts.secrets/") && strings.HasSuffix(f.Path, ".enc") {
+			return true
+		}
+	}
+	return false
+}
+
 // accountFileExists 报告账号数据文件是否存在。
 //
 // 用途：区分"全新安装（文件都没有）"与"有数据但读不了"。前者应显示空列表，
