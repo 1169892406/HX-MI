@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.55",
+  "version": "2.0.0-alpha.56",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -258,7 +258,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.55：双层修「PLUGIN_UI_FRAME_NOT_ATTACHED 还没有连上平台」。① 插件侧：rpc 在通道就绪前**排队**而不是直接失败（host-ready 是权威信号，1200ms 兜底放行，30s 仍未连上报错）；② 平台侧返回该码时**自动重试**最多 3 次（间隔 300ms）—— 那时序问题不是业务结论。之前用户刚打开配置页就看到「读取账号失败 / 登录失败」，实际只需再等一两百毫秒。",
+  "changelog": "2.0.0-alpha.56：**根修插件自带界面全部失效**。app.js 的协议常量写成字符串「homex.plugin.ui/1」，而平台发的是数字 1（PLUGIN_UI_PROTOCOL = 1）。每一处守卫都是严格比较 m.hx !== HX ⇒ 平台发来的**每一帧都被丢弃**：connect 不建端口、host-ready 不触发首个请求、RPC 应答永远收不到。用户看到的一切（账号列表卡「读取中…」、点登录报 PLUGIN_UI_FRAME_NOT_ATTACHED、界面「全都不对」）都源于这一个字符差异。HXCS 写的是 var HX = 1，所以一直正常。已改为 1，并用桩环境验证握手全通。",
   "tools": [
     "regions",
     "login",

@@ -26,7 +26,21 @@
 (function () {
   'use strict';
 
-  var HX = 'homex.plugin.ui/1';
+  /*
+   * ⚠ 必须是数字 1，与平台 `PLUGIN_UI_PROTOCOL` 完全一致（2026-11-09 根修）。
+   *
+   * 这里原来写的是字符串 `'homex.plugin.ui/1'`，而平台发的是数字 `1`
+   * （pluginUiProtocol.ts: `PLUGIN_UI_PROTOCOL = 1 as const`）。
+   * 本文件的每一处守卫都是严格比较 `m.hx !== HX` ⇒ **平台发来的每一帧都被丢弃**：
+   *   · `connect`（不建端口）→ port 永远为 null
+   *   · `host-ready`（不发首个请求）→ 界面停在初始占位
+   *   · RPC 应答（永远收不到）→ 所有调用超时
+   *
+   * 用户看到的一切（账号列表「读取中…」、点登录报
+   * 「PLUGIN_UI_FRAME_NOT_ATTACHED 还没有连上平台」、界面"全都不对"）
+   * 都是这一个字符差异造成的。HXCS 写的是 `var HX = 1`，所以它一直正常。
+   */
+  var HX = 1;
   var RPC_TIMEOUT_MS = 30000;
 
   var port = null;
