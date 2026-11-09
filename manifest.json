@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.63",
+  "version": "2.0.0-alpha.65",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -89,8 +89,7 @@
       },
       {
         "name": "account_sync",
-        "risk": "medium",
-        "scope": "account"
+        "risk": "medium"
       },
       {
         "name": "account_delete",
@@ -206,6 +205,12 @@
           "max_bytes": 64,
           "scope": "device",
           "rotatable": true
+        },
+        {
+          "key": "accounts_key_material",
+          "max_bytes": 128,
+          "scope": "household",
+          "rotatable": false
         }
       ]
     }
@@ -264,7 +269,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.63：修**「删除」等三个按钮点了没反应**。真因：插件界面跑在 sandbox=\"allow-scripts\" 的 iframe 里，**没有 allow-modals** —— 规范规定这种情形下 window.confirm() 不弹窗、直接返回 false。于是三处「先确认再执行」的按钮全哑，而且**没有任何报错**（代码逻辑上等于\"用户点了取消\"）：删除同步条目 / 删除账号 / 退出登录。改为页面内确认框（overlay + 卡片），并加闸门：源码（剥注释后）不得出现 window.confirm/alert/prompt；再逐个点一遍所有按钮断言有反应（共 21 项）。顺带把行内「删除」按钮加上边框（原来太淡）。",
+  "changelog": "2.0.0-alpha.65：承接 alpha.64，把「密钥材料缺失」从**拒绝**改成**可恢复**。上一版写成\"有旧密文就报错，免得新旧混淆\"—— 但那个错误会一路传到登录保存凭据，结果是**用户永远无法重新登录**（每次都被\"密钥不可用\"挡住），而登录是插件最核心的功能。已损坏的密文本来就已经解不开，拒绝建新钥保护不了它，只会把插件锁死。现在：生成新钥 + 如实告警\"有旧密文已无法解密\"，那些账号读取凭据时报错并要求重新登录（诚实且可恢复），而不是整个登录流程不可用。",
   "tools": [
     "regions",
     "login",

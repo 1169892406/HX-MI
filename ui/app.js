@@ -1170,10 +1170,21 @@
   function syncNowFor(accountId, btn) {
     if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
     clearBanner();
+    /*
+     * ⚠ 这里**不能**带顶层 account_id（2026-11-10 修「读取会话密钥失败」）。
+     *
+     * 顶层 account_id 会让平台把这次调用判成**账号上下文**
+     * （CallAs → CallAccount），而 account_sync 要读的是**家庭级**的会话材料
+     * （manifest 里 xiaomi_session_material 声明为 household scope）——
+     * 家庭级 blob 不接受账号上下文，平台直接拒：
+     *   `PLUGIN_PERMISSION_DENIED: 家庭级 secret blob ... 不接受账号上下文`
+     *
+     * 语义上也对：HX-MI 只维护**一个**云端会话（插件自己文档里写明
+     * "多账号并发同步尚未实现"），所以"手动同步"本质是家庭级动作；
+     * account_id 只作为参数传下去，供插件将来按账号分流时使用。
+     */
     var args = accountId ? { account_id: accountId } : {};
-    var payload = { tool: 'account_sync', args: args };
-    if (accountId) payload.account_id = accountId;
-    rpc('plugin.tool.call', payload)
+    rpc('plugin.tool.call', { tool: 'account_sync', args: args })
       .then(function (res) {
         // 业务失败帧与"状态不是 succeeded"是两件不同的事，都要如实说。
         if (failed(res)) {

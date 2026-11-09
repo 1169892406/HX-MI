@@ -84,12 +84,34 @@ const accountsKeyBlob = "accounts_key_material"
 // 只有当真的要用密钥（加解密账号凭据）时才会报错 —— 那时的错误也必须说清
 // 是"密钥不可用"，而不是让人以为账号数据没了。
 func openAccountStore(ctx *plugin.Context) (*accountStore, error) {
-	key, kerr := ensureAccountKey(ctx)
-	if kerr != nil {
-		ctx.LogWarn("hx-mi account secret key unavailable: %v（账号列表仍可读；凭据加解密会报错）", kerr)
-		return &accountStore{ctx: ctx}, nil
+	/*
+	 * ⚠ 这里**完全不碰密钥库**（2026-11-10 第二次修）。
+	 *
+	 * 上一版在打开时就取密钥 —— 而取密钥要读 VaultBlob，而 VaultBlob 的
+	 * scope 判定会看**当前调用上下文**：家庭级 blob 不接受账号上下文
+	 * （`secretblobs.go` 的 blobAccount）。于是"账号级工具"（account_settings /
+	 * account_delete）一进来就被平台拒：
+	 *   `PLUGIN_PERMISSION_DENIED: 家庭级 secret blob "accounts_key_material" 不接受账号上下文`
+	 *
+	 * 而这两个工具**根本不需要密钥**：它们读写的是明文元数据
+	 * （accounts.json / 删文件），密钥只在加解密 accounts.secrets/*.enc 时才要。
+	 * 所以改成惰性：真要用的时候（saveSecret/loadSecret）才去取，
+	 * 那时若拿不到就报"密钥不可用"，语义比"整个工具失败"精确得多。
+	 */
+	return &accountStore{ctx: ctx}, nil
+}
+
+// secretKey 惰性取密钥（首次使用时缓存在实例上）。
+func (s *accountStore) secretKey() ([]byte, error) {
+	if len(s.key) > 0 {
+		return s.key, nil
 	}
-	return &accountStore{ctx: ctx, key: key}, nil
+	key, err := ensureAccountKey(s.ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.key = key
+	return key, nil
 }
 
 // deriveAccountKey 把材料派生成 32 字节密钥（与旧实现逐字一致，保证既有密文可解）。
@@ -124,12 +146,24 @@ func ensureAccountKey(ctx *plugin.Context) ([]byte, error) {
 		return deriveAccountKey(material), nil
 	}
 
-	// ③ 什么来源都没有：若已有凭据密文，说明密钥丢了 —— 不能凭空造新密钥
-	//    （那会让密文永远解不开，且新写入的会与旧的混在一起），如实报错。
+	/*
+	 * ③ 什么来源都没有 ⇒ 生成一份新材料并固化。
+	 *
+	 * # 为什么这里**不**拒绝（曾经写成拒绝，是个陷阱）
+	 *
+	 * 上一版逻辑是"存在旧密文就报错，免得新钥与旧密文混淆"。但那个错误会一路传到
+	 * 登录保存凭据那一步 ⇒ **用户永远无法重新登录**（每次都被"密钥不可用"挡住），
+	 * 而这是插件最核心的功能。已损坏的密文本来就已经解不开（密钥没了），
+	 * 拒绝建新钥并不能"保护"它，只能把插件锁死。
+	 *
+	 * 现在的取舍：建新钥，并如实告警"有 N 份旧密文已无法解密"。
+	 * 那些账号行会在读取凭据时报错并要求重新登录 —— 这是诚实且可恢复的；
+	 * 而"整个登录保存不了"是不可恢复的。
+	 */
 	if hasAnyAccountSecret(ctx) {
-		return nil, errors.New("账号存储密钥不可用：既有账号凭据无法解密，请重新登录该账号以重建凭据")
+		ctx.LogWarn("hx-mi 账号密钥材料缺失但存在旧凭据密文：这些账号的凭据已无法解密（需重新登录）；" +
+			"本次生成新的密钥材料，后续登录的凭据可正常保存")
 	}
-	// 全新安装：生成一次材料并固化。
 	fresh := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, fresh); err != nil {
 		return nil, err
@@ -319,7 +353,11 @@ func (s *accountStore) delete(id string, rev uint64) error {
 	return s.ctx.FSRemove("accounts.secrets/" + id + ".enc")
 }
 func (s *accountStore) saveSecret(id string, p []byte) error {
-	block, err := aes.NewCipher(s.key)
+	key, err := s.secretKey()
+	if err != nil {
+		return fmt.Errorf("账号凭据无法加密保存：%w", err)
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return err
 	}
@@ -348,7 +386,11 @@ func (s *accountStore) loadSecret(id string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	block, err := aes.NewCipher(s.key)
+	key, err := s.secretKey()
+	if err != nil {
+		return nil, fmt.Errorf("账号凭据无法解密：%w", err)
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
