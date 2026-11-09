@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HX-MI 配置</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <!-- ── 页头 ────────────────────────────────────────────────
+       返回按钮由本页渲染（宿主 iframe 是 opaque origin，只有它能调
+       plugin.ui.close）。一直显示，不做 hover-only。 -->
+  <header class="hd">
+    <div class="hd__t">
+      <h1>HX-MI</h1>
+      <p class="sub">小米设备 · 账号与同步</p>
+    </div>
+    <span class="spacer"></span>
+    <button type="button" id="btn-back" class="btn btn--ghost">← 返回插件列表</button>
+    <button type="button" id="btn-save" class="btn btn--primary">保存配置</button>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <!-- ── ① 账号 ────────────────────────────────────────────-->
+  <section class="sec">
+    <h2>小米账号</h2>
+    <p class="sec__d">账号用于读取云端设备列表；局域网设备无需登录即可控制。</p>
+
+    <!-- 已登录账号列表：一直显示（空态也显示一行说明，不是隐藏整块） -->
+    <div class="card">
+      <div class="card__hd">
+        <b>已登录账号</b>
+        <span class="spacer"></span>
+        <button type="button" id="btn-reload-accounts" class="btn btn--sm">刷新</button>
+        <button type="button" id="btn-add" class="btn btn--sm btn--primary">添加账号</button>
+      </div>
+      <div id="accounts" class="accounts"><p class="muted">读取中…</p></div>
+    </div>
+
+    <!-- 登录表单：点"添加账号"展开（默认收起但按钮常显） -->
+    <div id="login-form" class="card" hidden>
+      <div class="card__hd"><b>登录小米账号</b></div>
+      <div class="form">
+        <label>
+          <span>账号（手机号/邮箱/账号 ID）</span>
+          <input type="text" id="f-user" autocomplete="username" placeholder="手机号 或 账号 ID">
+        </label>
+        <label>
+          <span>密码</span>
+          <input type="password" id="f-pass" autocomplete="current-password" placeholder="小米账号密码">
+        </label>
+        <label>
+          <span>区域</span>
+          <select id="f-region">
+            <option value="cn">中国大陆</option>
+          </select>
+        </label>
+        <div class="form__act">
+          <button type="button" id="btn-login" class="btn btn--primary">登录</button>
+          <button type="button" id="btn-cancel-login" class="btn">取消</button>
+        </div>
+        <p id="login-hint" class="muted" hidden></p>
+      </div>
+    </div>
+
+    <!-- 验证挑战：need_verify / need_captcha 时展开 -->
+    <div id="challenge" class="card" hidden>
+      <div class="card__hd"><b id="ch-title">需要验证</b></div>
+      <div class="form">
+        <p id="ch-desc" class="muted"></p>
+        <img id="ch-img" alt="验证码" hidden>
+        <label>
+          <span id="ch-label">验证码</span>
+          <input type="text" id="f-code" inputmode="numeric" placeholder="输入验证码">
+        </label>
+        <label id="ch-web-row" hidden>
+          <span>或粘贴网页验证链接</span>
+          <input type="text" id="f-web" placeholder="https://sts.api.io.mi.com/sts?...">
+        </label>
+        <div class="form__act">
+          <button type="button" id="btn-verify" class="btn btn--primary">提交验证</button>
+          <button type="button" id="btn-verify-web" class="btn" hidden>用链接验证</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── ② 同步与设备 ──────────────────────────────────────-->
+  <section class="sec">
+    <h2>同步与设备</h2>
+    <p class="sec__d">控制云端设备列表的拉取节奏与范围。</p>
+    <div class="card">
+      <div class="form">
+        <label>
+          <span>同步间隔（秒）</span>
+          <input type="number" id="f-interval" min="60" max="86400" step="30" placeholder="300">
+        </label>
+        <label class="row-switch">
+          <span>自动同步</span>
+          <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="false"><i></i></button>
+        </label>
+        <p class="muted small">关闭后不再后台轮询云端设备列表（手动同步仍可用）。</p>
+        <label>
+          <span>设备型号过滤（逗号分隔，留空 = 全部）</span>
+          <input type="text" id="f-filter" placeholder="如 lumi.acpartner, zhimi.airpurifier">
+        </label>
+        <div class="form__act">
+          <button type="button" id="btn-sync-now" class="btn">立即同步</button>
+        </div>
+        <p id="sync-hint" class="muted small" hidden></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── ③ 诊断 ────────────────────────────────────────────-->
+  <section class="sec">
+    <h2>诊断</h2>
+    <div class="card">
+      <div class="card__hd">
+        <b>运行状态</b>
+        <span class="spacer"></span>
+        <button type="button" id="btn-diag" class="btn btn--sm">读取</button>
+      </div>
+      <pre id="diag" class="diag">点「读取」查看当前状态。</pre>
+    </div>
+  </section>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

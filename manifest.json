@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.45",
+  "version": "2.0.0-alpha.47",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -29,7 +29,8 @@
     "migration.device_secret"
   ],
   "entry": {
-    "wasm": "plugin.wasm"
+    "wasm": "plugin.wasm",
+    "ui": "ui/index.html"
   },
   "provides": {
     "tools": [
@@ -165,10 +166,7 @@
             "userId",
             "cUserId"
           ],
-          "secret_key": "xiaomi_service",
-          "alias": {
-            "yetAnotherServiceToken": "serviceToken"
-          }
+          "secret_key": "xiaomi_service"
         },
         {
           "host": "api.io.mi.com",
@@ -177,10 +175,7 @@
             "userId",
             "cUserId"
           ],
-          "secret_key": "xiaomi_service",
-          "alias": {
-            "yetAnotherServiceToken": "serviceToken"
-          }
+          "secret_key": "xiaomi_service"
         }
       ]
     },
@@ -258,7 +253,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.42: hot-deploy verification. Deployed purely through the new hot-deploy path (drop package into plugin directory, platform hot-installs, service never restarts).",
+  "changelog": "2.0.0-alpha.47：新增**插件自带配置界面**（ui/index.html）。平台曾在 66d5657 删掉 HX-MI 的专属配置页，导致账号登录/验证码/账号列表/手动同步这些核心能力没有入口，只剩通用表单的 4 个字段。按用户裁定「插件自己的界面由插件自己带」，本版把界面放回插件包内，平台零改动。",
   "tools": [
     "regions",
     "login",

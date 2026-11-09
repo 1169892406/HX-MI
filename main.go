@@ -57,8 +57,28 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 		}
 	}
 	current = next
+	// 旧数据迁移是**可选能力**，失败不得阻断插件启用（2026-11-09 修正）。
+	//
+	// # 为什么改
+	//
+	// 原实现把迁移失败当成致命错误：部署没有把 `hx_mi_legacy` 映射到只读目录
+	// （平台按 fail-closed 拒绝 —— 这是正确的安全设计，源必须是部署显式给出的
+	// 白名单）时，整个配置下发失败，用户看到的是
+	//   PLUGIN_PERMISSION_DENIED：legacy: 源 "hx_mi_legacy" 未在宿主配置中映射
+	// 而用户此时的真实诉求是"用插件"，不是"迁移旧数据"——尤其在新装、无旧数据
+	// 的部署里，这条硬失败让插件完全不可用，代价和收益完全不成比例。
+	//
+	// # 改后语义
+	//
+	//   · 有旧数据且源已映射 ⇒ 正常迁移（行为不变）；
+	//   · 无源映射 / 旧数据不可读 ⇒ **跳过并 Warn**，插件照常启用；
+	//   · 迁移中途失败 ⇒ 同样只 Warn：migrateLegacy 内部保证"未提交则旧源可恢复"，
+	//     不会留下半截数据，所以重试是安全的（下次 Configure 会再试一次）。
+	//
+	// 这不是掩盖问题：Warn 日志带着完整原因，运维配好 legacy_sources 并重启后
+	// 会自动重试成功。
 	if err := migrateLegacy(ctx); err != nil {
-		return fmt.Errorf("旧数据迁移失败: %w", err)
+		ctx.LogWarn("旧数据迁移跳过（插件仍可用）：%v", err)
 	}
 	if _, err := ctx.UDPListen(54321); err != nil {
 		return fmt.Errorf("active udp listener: %w", err)
