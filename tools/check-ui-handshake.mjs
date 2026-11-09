@@ -32,6 +32,15 @@ const PLATFORM_HX = 1;
 
 let failed = 0;
 const HTML = fs.readFileSync(path.join(HERE, '..', 'ui', 'index.html'), 'utf8');
+/** 递归收集桩元素的文本（假 DOM 不算 textContent，只能自己走一遍）。 */
+function collectText(node) {
+  if (!node) return '';
+  if (Array.isArray(node)) return node.map(collectText).join(' ');
+  const own = typeof node.textContent === 'string' ? node.textContent : '';
+  const kids = Array.isArray(node.children) ? node.children.map(collectText).join(' ') : '';
+  return (own + ' ' + kids).trim();
+}
+
 const ok = (name, cond, detail) => {
   if (cond) console.log(`  ✔ ${name}`);
   else {
@@ -87,9 +96,14 @@ global.window = {
   location: { origin: 'http://localhost', href: 'http://localhost/' },
   setTimeout, clearTimeout, setInterval, clearInterval,
 };
+const fakeTextNode = (t) => ({
+  nodeType: 3, textContent: String(t), children: [], style: {},
+  appendChild() {}, setAttribute() {}, removeAttribute() {},
+});
 global.document = {
   getElementById: getEl, querySelector: () => null, querySelectorAll: () => [],
   createElement: (t) => new FakeEl('new-' + t),
+  createTextNode: (t) => fakeTextNode(t),
   documentElement: new FakeEl('html'), body: new FakeEl('body'),
   addEventListener() {},
 };
@@ -132,6 +146,51 @@ ok('脚本可加载（无运行时异常）', !threw, threw && threw.message);
 ok('已注册 message 监听（收 connect 的入口）',
   (winListeners.message || []).length > 0, '没有 window.addEventListener("message")');
 
+/*
+ * 应答 RPC：**这一步是必需的**。
+ *
+ * 2026-11-10 的教训：本闸门此前只发 connect + host-ready 就收工，全部通过；
+ * 而线上真实形态是「账号行渲染出来了、同步列表整块空白，并报
+ * Cannot read properties of undefined」—— 一个 renderSyncRows 里的
+ * `var` 提升顺序错误。那条路径**只在真的有 RPC 应答时才会跑到**。
+ * 只验"帧发得出去"，等于把最常出事的那一段（拿数据 → 渲染）整个漏掉。
+ */
+const ACCOUNTS_OK = {
+  accounts: [{
+    account_id: 'acc_demo', masked_account: '1***@qq.com', region: 'cn',
+    household_id: 'hh-1', state: 'ready', revision: 1,
+    // ⚠ 真实形状是**嵌套**的（account_store.go 的 account.Sync 是结构体）。
+    // 夹具必须照真实形状给：扁平夹具会让"读错字段"的缺陷假绿。
+    sync: { enabled: true, interval_seconds: 300 },
+  }],
+  account_names: { acc_demo: '1169892406@qq.com' },
+};
+const ACCOUNT_VIEW = {
+  state: 'no_session', device_count: 0,
+  sync: { enabled: true, running: false, devices: 0, controllable: 0, uncontrollable: 0, device_list: [] },
+};
+const CONFIG_OK = {
+  plugin_id: 'homex.xiaomi_miot', version: '0.0.0-test', legacy: false,
+  config: { region: 'cn', sync_interval_seconds: 300, polling_enabled: true, device_filter_models: [] },
+  config_schema: {}, secret_fields: [], config_secrets_set: [],
+  household: { id: 'hh-1', name: '我的HOMEX家' },
+};
+
+const rawPost = fakePort.postMessage.bind(fakePort);
+fakePort.postMessage = (frame) => {
+  rawPost(frame);
+  if (!frame || typeof frame.op !== 'string') return;
+  let result = { ok: true };
+  if (frame.op === 'plugin.config.get') result = CONFIG_OK;
+  else if (frame.op === 'plugin.tool.call') {
+    const tool = frame.payload && frame.payload.tool;
+    if (tool === 'accounts') result = ACCOUNTS_OK;
+    else if (tool === 'account') result = ACCOUNT_VIEW;
+  }
+  // 真的投递回插件（真实 MessagePort 会做这件事；假端口不会）。
+  if (portHandler) portHandler({ data: { hx: PLATFORM_HX, id: frame.id, ok: true, result } });
+};
+
 // 平台发 connect
 for (const fn of (winListeners.message || [])) {
   fn({ data: { hx: PLATFORM_HX, type: 'connect', plugin_id: 'homex.xiaomi_miot' }, ports: [fakePort], source: {} });
@@ -154,6 +213,33 @@ ok('也请求了配置', posted.some((m) => m.op === 'plugin.config.get'), '未�
 ok('所有出站帧的 hx 与平台同值',
   posted.every((m) => m.hx === PLATFORM_HX),
   '出站帧的 hx 与平台不一致，宿主会丢弃它们');
+
+/* ══ 渲染路径（2026-11-10 补）═════════════════════════════════════════
+ *
+ * 这一组是补课：前面的断言只证明"帧发得出去"，而线上出的是"数据回得来但渲染炸"。
+ * 判据直接看桩 DOM 的结果 —— 账号区不得出现失败文案、同步列表要有行。
+ */
+console.log('== U19 回来的数据真的能渲染');
+{
+  const accountsText = collectText(getEl('accounts'));
+  ok('U19a 账号区有内容', accountsText.length > 0,
+    '空 = renderAccounts 没跑到（或第一个分支就 return）');
+  ok('U19b 账号区没有失败文案', !accountsText.includes('失败'), `实际：${accountsText.slice(0, 120)}`);
+  ok('U19c 账号区渲染出了行', getEl('accounts').children.length >= 1,
+    `子节点 ${getEl('accounts').children.length}`);
+
+  const syncRows = getEl('sync-rows').children.length;
+  ok('U19d 同步列表按"已绑定家庭的账号"渲染出行', syncRows >= 1,
+    `子节点 ${syncRows} —— 夹具里的账号有 household_id，应当出现一行；` +
+    '为 0 时最常见的成因是渲染中途抛异常（被 loadAccounts 的 catch 吞掉，只留一句失败文案）');
+  const syncText = collectText(getEl('sync-rows'));
+  ok('U19e 行内显示该条周期（每 N 分钟）', syncText.includes('每'), `实际：${syncText.slice(0, 120)}`);
+  ok('U19f 行内自动同步状态取自**嵌套** sync.enabled', syncText.includes('开启'),
+    '夹具给的是嵌套形状；显示"关闭"说明还在按扁平字段读（那个字段不存在）');
+
+  ok('U19g 第 4 格是"离线设备"', collectText(getEl('res-tiles')).includes('离线设备'),
+    `实际：${collectText(getEl('res-tiles')).slice(0, 120)}`);
+}
 
 console.log(failed === 0 ? '\nOK  插件界面握手闸门全部通过' : `\nFAIL ${failed} 条未通过`);
 process.exit(failed === 0 ? 0 : 1);

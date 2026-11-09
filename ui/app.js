@@ -630,6 +630,17 @@
       var id = a.account_id || '';
       var name = names[id] || a.masked_account || id;
       var draft = draftEdits[id] || {};
+      /*
+       * ⚠ `val` 必须在**本循环最前面**求值（2026-11-10 修线上报错）。
+       *
+       * 原来它写在下面的"操作列"那一段，而上面的副标题已经先用了它 ——
+       * `var` 提升让 `val` 此时是 undefined，浏览器抛
+       * 「Cannot read properties of undefined (reading 'intervalSeconds')」，
+       * 而 renderAccounts 只把异常记进 catch ⇒ 表现为"账号行出来了、同步列表整块空"。
+       * （教训：同一函数里前面的代码引用后面才赋值的 var，静态检查看不出来，
+       *  只有真正跑一遍渲染才暴露 —— 桩环境必须**应答 RPC**才能覆盖到这段。）
+       */
+      var val = entryValue(a);
 
       var row = document.createElement('div');
       row.className = 'srow';
@@ -662,7 +673,6 @@
       var ops = document.createElement('div');
       ops.className = 'srow__o';
 
-      var val = entryValue(a);
       var on = val.enabled;
       var swWrap = document.createElement('span');
       swWrap.className = 'switch-row';

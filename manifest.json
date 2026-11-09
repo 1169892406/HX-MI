@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.61",
+  "version": "2.0.0-alpha.62",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -264,7 +264,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.61：修**「退出登录后账号列表整块报错、看着像账号丢了」**。① 账号存储密钥与会话解耦：密钥改从专用且**永不删除**的 blob （accounts_key_material）派生；退出登录只清会话，不再带走账号库的钥匙。② openAccountStore 不再因密钥缺席而整块失败 —— accounts.json 是明文元数据，与密钥无关；只有凭据加解密才需要它，那时的错误也会说清是密钥不可用。③ 会话密钥\"不存在\"改为正常状态（no_session）而不是故障：「没登录」是最正常的一种状态，不该让同步结果卡整块报错。账号数据一直都在磁盘上，安装本版后即恢复显示。",
+  "changelog": "2.0.0-alpha.62：修「账号行出来了但同步列表整块空白 + 报 Cannot read properties of undefined (reading 'intervalSeconds')」。真因：renderSyncRows 里 `val` 的赋值写在\"操作列\"那一段，而上面的副标题已经先用了它 —— var 提升让它在使用时是 undefined，异常被 loadAccounts 的 catch 吞掉，只留一句失败文案。已把求值提到循环最前面。同时把闸门升级为**应答 RPC**（照真实嵌套形状给夹具）并断言渲染结果 —— 此前它只验\"帧发得出去\"，验不到\"数据回得来但渲染炸\"这一类；红侧自证：把赋值挪回去，闸门立刻 3 条转红。",
   "tools": [
     "regions",
     "login",
