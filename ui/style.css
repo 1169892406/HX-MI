@@ -86,9 +86,31 @@ body {
 .btn--primary:hover { filter: brightness(.95); }
 .btn--ghost { background: transparent; border-color: transparent; color: var(--muted); }
 .btn--ghost:hover { background: var(--card); color: var(--text); }
-.btn--danger { background: transparent; border-color: transparent; color: var(--danger); }
+.btn--danger {
+  background: transparent; color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+}
 .btn--danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .btn--sm { height: 30px; padding: 0 11px; font-size: 12.5px; border-radius: 8px; }
+
+/* 危险操作实心按钮（确认框里用；页面内的「删除」用幽灵样式即可） */
+.btn--danger-fill { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn--danger-fill:hover { filter: brightness(.95); }
+
+/* ── 页面内确认框 ─────────────────────────────────────── */
+/* 为什么不是 window.confirm：插件界面在 sandbox="allow-scripts" 的 iframe 里，
+   没有 allow-modals ⇒ confirm() 不弹窗、直接返回 false，按钮会变哑。 */
+.confirm {
+  position: fixed; inset: 0; z-index: 50;
+  background: color-mix(in srgb, #000 38%, transparent);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.confirm__card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 18px; max-width: 440px; width: 100%;
+}
+.confirm__msg { margin: 0 0 16px; font-size: 13.5px; line-height: 1.6; white-space: pre-wrap; }
+.confirm__act { display: flex; gap: 8px; justify-content: flex-end; }
 
 /* ── 提示条 ───────────────────────────────────────────── */
 .banner {

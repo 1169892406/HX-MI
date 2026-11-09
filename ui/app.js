@@ -254,6 +254,68 @@
 
   /* ── 提示 ──────────────────────────────────────────────── */
 
+  /*
+   * ## 页面内确认框（**绝不能用 window.confirm**）
+   *
+   * 插件界面跑在 `sandbox="allow-scripts"` 的 iframe 里，**没有 allow-modals**
+   * —— 规范规定这种情形下 `window.confirm()` **不弹窗、直接返回 false**。
+   * 于是所有"先确认再执行"的按钮都变成死按钮：点了什么都不发生，也**没有任何报错**
+   * （不报错是因为代码逻辑上"用户点了取消"）。实测三处全哑：
+   *   删除同步条目 / 删除账号 / 退出登录。
+   *
+   * 自己画一个：overlay + 卡片 + 取消/确认。它是页面内 DOM，不受 modal 限制；
+   * iframe 高度按内容上报，所以 overlay 用 position:fixed 就能盖住可见区域。
+   *
+   * 返回 Promise<boolean>：调用方写 `confirmDialog(...).then(function (ok) { ... })`，
+   * 语义与原来的 `if (!window.confirm(...)) return;` 一一对应。
+   */
+  function confirmDialog(message, confirmText, opts) {
+    var o = opts || {};
+    return new Promise(function (resolve) {
+      var ov = document.createElement('div');
+      ov.className = 'confirm';
+
+      var card = document.createElement('div');
+      card.className = 'confirm__card';
+
+      var p = document.createElement('p');
+      p.className = 'confirm__msg';
+      p.textContent = message;
+      card.appendChild(p);
+
+      var act = document.createElement('div');
+      act.className = 'confirm__act';
+
+      var cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'btn btn--sm';
+      cancel.textContent = '取消';
+
+      var okBtn = document.createElement('button');
+      okBtn.type = 'button';
+      okBtn.className = 'btn btn--sm ' + (o.danger ? 'btn--danger-fill' : 'btn--primary');
+      okBtn.textContent = confirmText || '确认';
+
+      var done = false;
+      function close(v) {
+        if (done) return;      // 防重入：连点两下不该结算两次
+        done = true;
+        if (ov.parentNode) ov.parentNode.removeChild(ov);
+        scheduleHeight();
+        resolve(v);
+      }
+      cancel.addEventListener('click', function () { close(false); });
+      okBtn.addEventListener('click', function () { close(true); });
+
+      act.appendChild(cancel);
+      act.appendChild(okBtn);
+      card.appendChild(act);
+      ov.appendChild(card);
+      document.body.appendChild(ov);
+      scheduleHeight();
+    });
+  }
+
   function showBanner(text, kind) {
     var b = el('banner');
     b.textContent = text;
@@ -749,12 +811,17 @@
    * 只是"别把这个家同步进来"。两者代价差一个登录流程，必须分开并写清。
    */
   function removeSyncEntry(a, name) {
-    if (!window.confirm('移除同步「' + name + ' → ' + householdName(a.household_id) + '」？\n\n' +
-        '只解除这条同步关系并关闭它的自动同步；账号凭据保留，之后可以再添加回来。')) return;
-    setDraft(a.account_id || '', { household_id: null, sync_enabled: false });
-    // 立即从列表里去掉（草稿视角），让"删除"当场可见。
-    renderSyncRows(accountsCache, accountNamesCache);
-    scheduleHeight();
+    confirmDialog(
+      '移除同步「' + name + ' → ' + householdName(entryValue(a).householdId) + '」？\n\n' +
+      '只解除这条同步关系并关闭它的自动同步；账号凭据保留，之后可以再添加回来。',
+      '移除', { danger: true }
+    ).then(function (ok) {
+      if (!ok) return;
+      setDraft(a.account_id || '', { household_id: null, sync_enabled: false });
+      // 立即从列表里去掉（草稿视角），让"删除"当场可见。
+      renderSyncRows(accountsCache, accountNamesCache);
+      scheduleHeight();
+    });
   }
 
   /*
@@ -951,13 +1018,21 @@
 
   function removeAccount(id, revision) {
     if (!id) return;
-    if (!window.confirm('删除这个账号？其云端会话与凭据会一并清除。')) return;
-    rpc('plugin.tool.call', {
-      tool: 'account_delete',
-      args: { account_id: id, revision: revision || 0, confirm: true },
-    })
-      .then(function () { loadAccounts(); showBanner('账号已删除', 'ok'); })
-      .catch(function (e) { showBanner('删除失败：' + errText(e), 'err'); });
+    confirmDialog('删除这个账号？\n\n其云端会话与凭据会一并清除，需要重新登录才能再加回来。',
+      '删除', { danger: true }).then(function (ok) {
+      if (!ok) return;
+      rpc('plugin.tool.call', {
+        tool: 'account_delete',
+        args: { account_id: id, revision: revision || 0, confirm: true },
+        account_id: id,
+      })
+        .then(function (res) {
+          if (failed(res)) { showBanner('删除失败：' + failText(res), 'err'); return; }
+          loadAccounts();
+          showBanner('账号已删除', 'ok');
+        })
+        .catch(function (e) { showBanner('删除失败：' + errText(e), 'err'); });
+    });
   }
 
   /* ── 登录流程 ──────────────────────────────────────────── */
@@ -1236,9 +1311,15 @@
       showBanner('当前没有进行中的登录会话可退出；如需清除已保存的账号请用该行的「删除」', 'warn');
       return;
     }
-    if (!window.confirm('退出「' + (who || '当前账号') + '」的登录？\n\n' +
-        '这会清除云端会话（Cookie 票据与会话密钥），已保存的账号条目仍然保留；' +
-        '需要时重新登录即可。')) return;
+    confirmDialog('退出「' + (who || '当前账号') + '」的登录？\n\n' +
+      '这会清除云端会话（Cookie 票据与会话密钥），已保存的账号条目仍然保留；' +
+      '需要时重新登录即可。', '退出登录').then(function (ok) {
+      if (!ok) return;
+      doLogout(sid);
+    });
+  }
+
+  function doLogout(sid) {
     rpc('plugin.tool.call', { tool: 'logout', args: { session_id: sid } })
       .then(function () {
         sessionId = '';

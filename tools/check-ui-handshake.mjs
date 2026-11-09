@@ -74,19 +74,27 @@ class FakeEl {
   constructor(id) {
     this.id = id; this.style = {}; this.attrs = {}; this.children = [];
     this.hidden = false; this.disabled = false; this.value = '';
-    this.textContent = ''; this.innerHTML = '';
+    this.textContent = ''; this.innerHTML = ''; this.listeners = {};
     this.classList = { add() {}, remove() {}, toggle() {} };
   }
-  addEventListener() {} removeEventListener() {}
+  addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
+  removeEventListener() {}
+  /** 模拟点击（闸门用它逐个按钮验证"点了有没有反应"）。 */
+  fire(t) { (this.listeners[t] || []).forEach((fn) => fn({ type: t, preventDefault() {} })); }
+  get parentNode() { return this._parent || null; }
+  removeChild(c) { if (Array.isArray(this.children)) this.children = this.children.filter((x) => x !== c); return c; }
   setAttribute(k, v) { this.attrs[k] = v; }
   getAttribute(k) { return this.attrs[k] ?? null; }
-  appendChild(c) { this.children.push(c); return c; }
+  appendChild(c) { if (c) c._parent = this; this.children.push(c); return c; }
   querySelector() { return null; } querySelectorAll() { return []; }
   getBoundingClientRect() { return { height: 900, width: 1080, left: 86, top: 0 }; }
   focus() {} blur() {} click() {}
 }
 
 const els = new Map();
+const bodyEl = new FakeEl('body');
+els.set('body', bodyEl);
+
 const getEl = (id) => { if (!els.has(id)) els.set(id, new FakeEl(id)); return els.get(id); };
 const winListeners = {};
 
@@ -104,7 +112,7 @@ global.document = {
   getElementById: getEl, querySelector: () => null, querySelectorAll: () => [],
   createElement: (t) => new FakeEl('new-' + t),
   createTextNode: (t) => fakeTextNode(t),
-  documentElement: new FakeEl('html'), body: new FakeEl('body'),
+  documentElement: new FakeEl('html'), body: bodyEl,
   addEventListener() {},
 };
 global.ResizeObserver = class { observe() {} disconnect() {} };
@@ -133,6 +141,17 @@ const fakePort = {
   // 反向自证：把 script 标签拿掉，判据必须转红。
   ok(!/<script[^>]+src=["']app\.js["'][^>]*>/i.test(HTML.replace(/<script[^>]+src=["']app\.js["'][^>]*><\/script>/i, '')),
     '自证：剥掉 script 标签后同一条判据会转红', '否则这条断言只是把今天的写法供起来');
+}
+
+/*
+ * 按真实 HTML 初始化 `hidden`。
+ *
+ * 假元素默认 hidden=false，而 index.html 里带 `hidden` 属性的元素初始就是隐藏的。
+ * 不还原这一点，"点了展开/收起"就会被判反 —— 闸门第一版就是这么假红的。
+ */
+for (const m of HTML.matchAll(/<[^>]*\bid="([^"]+)"[^>]*>/g)) {
+  const tag = m[0];
+  if (/\shidden(\s|>|=)/.test(tag)) getEl(m[1]).hidden = true;
 }
 
 let threw = null;
@@ -239,6 +258,143 @@ console.log('== U19 回来的数据真的能渲染');
 
   ok('U19g 第 4 格是"离线设备"', collectText(getEl('res-tiles')).includes('离线设备'),
     `实际：${collectText(getEl('res-tiles')).slice(0, 120)}`);
+}
+
+/* ══ U20 每个按钮点了都得有反应（2026-11-10 补）══════════════════════════
+ *
+ * 起因：用户报「点击删除无效」。真身不是删除逻辑错，而是插件界面跑在
+ * `sandbox="allow-scripts"` 的 iframe 里 —— **没有 allow-modals**，
+ * `window.confirm()` 不弹窗、直接返回 false，于是三处"先确认再执行"的按钮
+ * 全哑，且**没有任何报错**（代码逻辑上等于"用户点了取消"）。
+ *
+ * 这一组做两件事：
+ *   ① 静态：源码（剥注释后）里不得再出现 window.confirm / window.alert / window.prompt；
+ *   ② 行为：逐个点一遍并断言效果 —— 发帧 / 展开表单 / 出现确认框。
+ * 光有 ① 会漏"按钮根本没绑上"（alpha.58 的 script 标签事故），
+ * 光有 ② 会漏"某条分支在别的条件下才哑"。两条一起才盖得住。
+ */
+console.log('== U20 按钮点击都有反应');
+{
+  const noComments = code
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  for (const fn of ['confirm', 'alert', 'prompt']) {
+    ok(`U20a 源码不使用 window.${fn}`,
+      !new RegExp(`(window\\.|\\b)${fn}\\s*\\(`).test(noComments),
+      `插件界面在 sandbox="allow-scripts" 的 iframe 里没有 allow-modals，` +
+      `window.${fn} 不弹窗直接返回 false ⇒ 按钮会变哑且无任何报错`);
+  }
+
+  const fired = [];
+  const before = posted.length;
+  /** 记录点击期间新发出的 op。 */
+  const clickAndCollect = async (id, label) => {
+    const n = posted.length;
+    getEl(id).fire('click');
+    await new Promise((r) => setTimeout(r, 40));
+    const ops = posted.slice(n).filter((m) => m.op).map((m) => m.op);
+    fired.push({ label, ops });
+    return ops;
+  };
+  const hasConfirm = () => bodyEl.children.filter((c) => c.className === 'confirm').length > 0;
+
+  // —— 发帧类 ——
+  const backOps = await clickAndCollect('btn-back', '返回插件列表');
+  ok('U20b 「返回插件列表」发出 plugin.ui.close',
+    backOps.includes('plugin.ui.close'), `实际：${backOps.join(',') || '（无帧）'}`);
+
+  const reloadOps = await clickAndCollect('btn-reload-accounts', '刷新');
+  ok('U20c 「刷新」重新取账号', reloadOps.includes('plugin.tool.call'), `实际：${reloadOps.join(',') || '（无帧）'}`);
+
+  const diagOps = await clickAndCollect('btn-diag', '诊断·读取');
+  ok('U20d 「诊断·读取」发出请求', diagOps.length > 0, `实际：${diagOps.join(',') || '（无帧）'}`);
+
+  const catOps = await clickAndCollect('btn-catalog-status', '设备目录·查看');
+  ok('U20e 「设备目录·查看」发出请求', catOps.includes('plugin.tool.call'), `实际：${catOps.join(',') || '（无帧）'}`);
+  const catROps = await clickAndCollect('btn-catalog-refresh', '设备目录·刷新目录');
+  ok('U20f 「设备目录·刷新目录」发出请求', catROps.includes('plugin.tool.call'), `实际：${catROps.join(',') || '（无帧）'}`);
+
+  const lanOps = await clickAndCollect('btn-lan-health', '局域网·立即探测');
+  ok('U20g 「局域网·立即探测」发出请求', lanOps.includes('plugin.tool.call'), `实际：${lanOps.join(',') || '（无帧）'}`);
+
+  // —— 展开类（不发帧，但要看到状态变化）——
+  getEl('btn-add').fire('click');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('U20h 「添加账号」展开登录表单', getEl('login-form').hidden === false, '点了没反应');
+
+  getEl('btn-cancel-login').fire('click');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('U20i 「取消」收起登录表单', getEl('login-form').hidden === true, '点了没反应');
+
+  getEl('btn-add-sync').fire('click');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('U20j 「＋ 添加同步」展开添加表单', getEl('addsync-form').hidden === false, '点了没反应');
+
+  getEl('btn-add-sync-cancel').fire('click');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('U20k 「取消」（添加同步）收起表单', getEl('addsync-form').hidden === true, '点了没反应');
+
+  const pollBefore = getEl('sw-polling').getAttribute('aria-checked');
+  getEl('sw-polling').fire('click');
+  await new Promise((r) => setTimeout(r, 20));
+  const pollAfter = getEl('sw-polling').getAttribute('aria-checked');
+  ok('U20l 「自动同步」开关可切换', pollBefore !== pollAfter && pollAfter !== null,
+    `点击前后都是 ${pollBefore} —— 开关没接上或没换状态`);
+
+  // —— 确认框类（本轮修的正是这一类）——
+  const syncDel = getEl('sync-rows').children[0].children.find((c) => c.className === 'srow__o');
+  const syncDelBtn = syncDel && syncDel.children.find((c) => c.textContent === '删除');
+  ok('U20m 同步条目行内有「删除」按钮', !!syncDelBtn, '找不到行内删除按钮');
+  if (syncDelBtn) {
+    syncDelBtn.fire('click');
+    await new Promise((r) => setTimeout(r, 30));
+    ok('U20n 「删除」（同步条目）弹出**页面内**确认框', hasConfirm(),
+      '没有确认框 = 又退回了 window.confirm（沙箱下永远返回 false，按钮会哑）');
+    // 取消后不应改动草稿
+    const cf = bodyEl.children.find((c) => c.className === 'confirm');
+    if (cf) {
+      const cancel = cf.children[0].children[1].children.find((b) => b.textContent === '取消');
+      cancel.fire('click');
+      await new Promise((r) => setTimeout(r, 30));
+      ok('U20o 确认框「取消」不产生改动', !hasConfirm(), '确认框没关掉');
+    }
+  }
+
+  // 账号行内的「退出登录」/「删除」也要弹确认框（同一处坑）
+  const acctRow = getEl('accounts').children.find((c) => c.className === 'acct');
+  const logoutBtn = acctRow && acctRow.children.find((c) => c.textContent === '退出登录');
+  ok('U20p 账号行内有「退出登录」', !!logoutBtn, '找不到');
+  if (logoutBtn) {
+    logoutBtn.fire('click');
+    await new Promise((r) => setTimeout(r, 30));
+    ok('U20q 「退出登录」有反应（弹确认框或如实提示）',
+      hasConfirm() || collectText(getEl('banner')).length > 0,
+      '点了什么都不发生 —— 这正是 sandbox 下 window.confirm 的表现');
+    const cf2 = bodyEl.children.find((c) => c.className === 'confirm');
+    if (cf2) cf2.children[0].children[1].children.find((b) => b.textContent === '取消').fire('click');
+  }
+
+  const delAcctBtn = acctRow && acctRow.children.find((c) => c.textContent === '删除');
+  if (delAcctBtn) {
+    delAcctBtn.fire('click');
+    await new Promise((r) => setTimeout(r, 30));
+    ok('U20r 「删除账号」弹出页面内确认框', hasConfirm(), '没有确认框');
+    const cf3 = bodyEl.children.find((c) => c.className === 'confirm');
+    if (cf3) {
+      // 顺带验证「确认」真的会发 account_delete（带 account_id）
+      const n = posted.length;
+      cf3.children[0].children[1].children.find((b) => b.textContent === '删除').fire('click');
+      await new Promise((r) => setTimeout(r, 40));
+      const delFrame = posted.slice(n).find((m) => m.op === 'plugin.tool.call' && m.payload.tool === 'account_delete');
+      // ⚠ account_id 在 **payload** 里：rpc(op, payload) 的第二个参数整体成为帧的 payload，
+      // 平台侧 readToolCallPayload 也正是从 payload 读 account_id。
+      const delAccountID = delFrame && delFrame.payload && delFrame.payload.account_id;
+      ok('U20s 确认后发出 account_delete 且带 account_id',
+        delAccountID === 'acc_demo',
+        delFrame ? `payload.account_id=${delAccountID}` : '没有发出 account_delete');
+    }
+  }
+  void before; void fired;
 }
 
 console.log(failed === 0 ? '\nOK  插件界面握手闸门全部通过' : `\nFAIL ${failed} 条未通过`);

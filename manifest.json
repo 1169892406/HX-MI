@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.62",
+  "version": "2.0.0-alpha.63",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -264,7 +264,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.62：修「账号行出来了但同步列表整块空白 + 报 Cannot read properties of undefined (reading 'intervalSeconds')」。真因：renderSyncRows 里 `val` 的赋值写在\"操作列\"那一段，而上面的副标题已经先用了它 —— var 提升让它在使用时是 undefined，异常被 loadAccounts 的 catch 吞掉，只留一句失败文案。已把求值提到循环最前面。同时把闸门升级为**应答 RPC**（照真实嵌套形状给夹具）并断言渲染结果 —— 此前它只验\"帧发得出去\"，验不到\"数据回得来但渲染炸\"这一类；红侧自证：把赋值挪回去，闸门立刻 3 条转红。",
+  "changelog": "2.0.0-alpha.63：修**「删除」等三个按钮点了没反应**。真因：插件界面跑在 sandbox=\"allow-scripts\" 的 iframe 里，**没有 allow-modals** —— 规范规定这种情形下 window.confirm() 不弹窗、直接返回 false。于是三处「先确认再执行」的按钮全哑，而且**没有任何报错**（代码逻辑上等于\"用户点了取消\"）：删除同步条目 / 删除账号 / 退出登录。改为页面内确认框（overlay + 卡片），并加闸门：源码（剥注释后）不得出现 window.confirm/alert/prompt；再逐个点一遍所有按钮断言有反应（共 21 项）。顺带把行内「删除」按钮加上边框（原来太淡）。",
   "tools": [
     "regions",
     "login",
