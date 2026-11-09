@@ -59,10 +59,47 @@
     try { port.postMessage(frame); return true; } catch (e) { return false; }
   }
 
-  function rpc(op, payload) {
+  /*
+   * ## RPC 在通道就绪前**排队**，不直接失败（2026-11-09 修实测的
+   *    `PLUGIN_UI_FRAME_NOT_ATTACHED：还没有连上平台`）
+   *
+   * 原来 `if (!port) reject(...)` 立刻失败。用户看到的是：刚打开配置页就出现
+   * 红色报错「读取账号失败 / 登录失败：还没有连上平台」—— 而实际上只需要再等
+   * 一两百毫秒通道就绪。
+   *
+   * 手抖点得快、iframe 重建、平台重新 mount 都会撞上这个窗口。**"还没连上"
+   * 不是错误**，是"还没到时候"。正确语义：排队，通道一就绪立刻发出。
+   *
+   * 排队上限用 RPC_TIMEOUT_MS（30s）：真的没握手成功时仍要报错，不能让用户
+   * 对着一个永远转圈的界面。
+   */
+  var preReadyQueue = [];
+
+  function flushPreReady() {
+    if (!port || !preReadyQueue.length) return;
+    var q = preReadyQueue;
+    preReadyQueue = [];
+    q.forEach(function (job) { job(); });
+  }
+
+  function rpc(op, payload, attempt) {
+    var tries = attempt || 0;
     return new Promise(function (resolve, reject) {
       if (!port) {
-        reject(makeErr('PLUGIN_UI_FRAME_NOT_ATTACHED', '还没有连上平台（稍候或重新打开配置页）'));
+        // 还没连上：排队等通道。超时再如实报错（与"通道坏了"区分开）。
+        var queued = true;
+        var waitTimer = setTimeout(function () {
+          if (!queued) return;
+          queued = false;
+          reject(makeErr('PLUGIN_UI_FRAME_NOT_ATTACHED',
+            '平台通道在 ' + Math.round(RPC_TIMEOUT_MS / 1000) + ' 秒内没有建立（可重新打开配置页）'));
+        }, RPC_TIMEOUT_MS);
+        preReadyQueue.push(function () {
+          if (!queued) return;
+          queued = false;
+          clearTimeout(waitTimer);
+          resolve(rpc(op, payload, tries));
+        });
         return;
       }
       var id = nextId();
@@ -72,7 +109,7 @@
           reject(makeErr('PLUGIN_UI_TIMEOUT', '平台没有在超时内应答'));
         }
       }, RPC_TIMEOUT_MS);
-      pending[id] = { resolve: resolve, reject: reject, timer: timer };
+      pending[id] = { resolve: resolve, reject: reject, timer: timer, op: op, payload: payload, attempt: tries };
       var frame = { hx: HX, id: id, op: op };
       if (payload !== undefined) frame.payload = payload;
       if (!send(frame)) {
@@ -104,6 +141,8 @@
       connected = true;
       startHeightReporting();
       requestBoot();
+      // 这是"平台已 attach"的**权威信号**：把之前排队的 RPC 放行。
+      flushPreReady();
       return;
     }
     if (typeof m.id === 'string' && typeof m.ok === 'boolean') {
@@ -114,7 +153,27 @@
       if (m.ok) p.resolve(m.result);
       else {
         var err = m.error || {};
-        p.reject(makeErr(err.code || 'PLUGIN_UI_HANDLER_FAILED', err.message || '平台拒绝了这次操作'));
+        var code = err.code || 'PLUGIN_UI_HANDLER_FAILED';
+        var msg = err.message || '平台拒绝了这次操作';
+        /*
+         * `PLUGIN_UI_FRAME_NOT_ATTACHED` 是**可重试**的（2026-11-09）。
+         *
+         * 它表示"宿主的通道还没 attach 完"—— 那是时序问题，不是业务结论。
+         * 直接抛给用户会看到「读取账号失败：还没有连上平台」，而其实再等
+         * 几百毫秒就好了。这里最多重试 3 次（间隔 300ms），仍失败才如实报错。
+         *
+         * 只对这一个码重试：别的错误（权限、参数、插件自身失败）重试毫无意义，
+         * 反而会把一次失败放大成三次。
+         */
+        if (code === 'PLUGIN_UI_FRAME_NOT_ATTACHED' && (p.attempt || 0) < 3) {
+          var next = (p.attempt || 0) + 1;
+          setTimeout(function () {
+            rpc(p.op, p.payload, next).then(p.resolve, p.reject);
+          }, 300);
+          // 这次响应已消费：不要走下面的 reject。
+          return;
+        }
+        p.reject(makeErr(code, msg));
       }
     }
   }
@@ -665,5 +724,7 @@
   // 可操作的错误，也不要永久停在「读取中…」）。
   setTimeout(function () {
     if (firstLoadPending && port) requestBoot();
+    // 兜底：平台版本差异导致 host-ready 没来时，也不能让排队的请求永远等。
+    flushPreReady();
   }, 1200);
 })();

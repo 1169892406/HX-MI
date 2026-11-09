@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.53",
+  "version": "2.0.0-alpha.55",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -258,7 +258,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.53：① accounts 在「全新安装（无主密钥、无会话、无账号文件）」时返回空列表而不是报错 —— 那是确实一个账号都没有，不是插件坏了；② 承接 alpha.52 的 catalog_status 只读缓存元数据（不再因解析 6.9MB 内嵌目录超时把沙箱拖死）。",
+  "changelog": "2.0.0-alpha.55：双层修「PLUGIN_UI_FRAME_NOT_ATTACHED 还没有连上平台」。① 插件侧：rpc 在通道就绪前**排队**而不是直接失败（host-ready 是权威信号，1200ms 兜底放行，30s 仍未连上报错）；② 平台侧返回该码时**自动重试**最多 3 次（间隔 300ms）—— 那时序问题不是业务结论。之前用户刚打开配置页就看到「读取账号失败 / 登录失败」，实际只需再等一两百毫秒。",
   "tools": [
     "regions",
     "login",
