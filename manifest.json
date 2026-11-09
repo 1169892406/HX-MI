@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.65",
+  "version": "2.0.0-alpha.67",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -269,7 +269,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.65：承接 alpha.64，把「密钥材料缺失」从**拒绝**改成**可恢复**。上一版写成\"有旧密文就报错，免得新旧混淆\"—— 但那个错误会一路传到登录保存凭据，结果是**用户永远无法重新登录**（每次都被\"密钥不可用\"挡住），而登录是插件最核心的功能。已损坏的密文本来就已经解不开，拒绝建新钥保护不了它，只会把插件锁死。现在：生成新钥 + 如实告警\"有旧密文已无法解密\"，那些账号读取凭据时报错并要求重新登录（诚实且可恢复），而不是整个登录流程不可用。",
+  "changelog": "2.0.0-alpha.67：根修**「云端有 12 台设备，但平台一台都没有、房间待绑定也是 0」**。真因：device.announce 要求**至少一个 capability**，而 capability 来自 MIoT 目录的 Binding 投影 —— 目录未构建/型号未收录时投影失败，调用处就当空 caps 继续，于是 12 台全部被平台拒（summary 里 announced=0 failed=12，而错误只计数、连日志都没记，界面上完全看不出来）。现在三级保底：①目录投影 ②已登记设备里学到的 ③型号前缀推断；全都没有时给 sensor（读状态永远成立）。宁可少报一个能力，也不要整台设备进不来。另：announce 失败现在会记下**原因**（原来只 failed++）。",
   "tools": [
     "regions",
     "login",
