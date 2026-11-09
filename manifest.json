@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.59",
+  "version": "2.0.0-alpha.60",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -264,7 +264,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.59：修**页面根本没加载脚本**。alpha.58 重写 index.html 时漏了 `<script src=\"app.js\">` —— 页面看起来正常（HTML/CSS 都在、控制台一条错都没有），但脚本从没运行：账号列表永远停在「读取中…」、返回按钮点不动、同步区全空。已补回，并给闸门加了两条接线断言（index.html 必须引用 app.js 与 style.css）＋反向自证；此前的闸门只验\"脚本本身没问题\"，验不到\"页面会不会加载它\"。另按用户口径：同步列表为空时**留空**，不再显示占位文案。",
+  "changelog": "2.0.0-alpha.60：① 「同步时间」与「自动同步」移进「添加同步」表单 —— 它们是**这一条**同步的属性（添加时设定），不再是列表上方的共用设置；条目行内显示该条的周期（每 N 分钟）。全局后台任务周期由条目推导：取**最勤快的那条**（一条自动同步都没有则不注册任务）。② 同步结果第 4 格「本次新增」改为「离线设备」，其判据与表格「在线状态」列同一个 online 标志，因此数字与表里数出来的行数一定一致。③ 修一个字段读错：账号返回的是嵌套 sync:{enabled,interval_seconds}，界面此前按扁平 a.sync_enabled 读 —— 永远 undefined，于是每行都显示「关闭」；现在两种形状都认并以嵌套为准。",
   "tools": [
     "regions",
     "login",

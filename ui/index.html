@@ -103,23 +103,6 @@
 
       <div id="sync-rows"></div>
 
-      <!-- 列表内的共用设置：**放在列表里**，但只有一份 ——
-           宿主只维持一个云端会话（多账号并发同步尚未实现），
-           若每行各写一个周期，多出来的那些就是不会生效的假承诺。
-           页头「保存配置」统一保存，这里不再单独放保存按钮。 -->
-      <div class="sync-foot">
-        <span class="ival">
-          同步时间 每
-          <input type="number" id="f-interval" min="1" max="60" step="1" aria-label="同步间隔（分钟）">
-          分钟
-        </span>
-        <span class="switch-row" id="polling-row">
-          <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="false"><i></i></button>
-          <span id="polling-t">自动同步</span>
-        </span>
-        <span class="muted small">对所有条目生效（当前部署只维持一个云端会话）</span>
-      </div>
-
       <!-- 未保存提示：改了条目但没点页头「保存配置」时必须看得见。
            只靠按钮上加个"•"容易被忽略，所以这里再给一行明确的话。 -->
       <p id="dirty-hint" class="muted small" hidden>有未保存的改动 —— 点右上角「保存配置」才会生效。</p>
@@ -135,10 +118,29 @@
             <select id="f-sync-household"></select>
           </label>
         </div>
+        <!-- 同步时间与自动同步是**这一条**的属性（2026-11-10 用户口径：
+             在「添加同步」里一并设定），不再是列表上方的共用设置。 -->
+        <div class="grid2" style="margin-top:12px">
+          <label class="form-label" style="display:flex;flex-direction:column;gap:5px;font-size:13px">
+            <span class="muted small">同步时间</span>
+            <span class="ival" style="height:36px">
+              每
+              <input type="number" id="f-interval" min="1" max="60" step="1" aria-label="同步间隔（分钟）">
+              分钟
+            </span>
+          </label>
+          <label class="form-label" style="display:flex;flex-direction:column;gap:5px;font-size:13px">
+            <span class="muted small">自动同步</span>
+            <span class="switch-row" id="polling-row" style="height:36px">
+              <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="false"><i></i></button>
+              <span id="polling-t">开启</span>
+            </span>
+          </label>
+        </div>
         <div class="form__act" style="margin-top:12px">
           <button type="button" id="btn-add-sync-ok" class="btn btn--sm btn--primary">添加</button>
           <button type="button" id="btn-add-sync-cancel" class="btn btn--sm">取消</button>
-          <span class="muted small" id="addsync-note">勾选「自动同步」的条目按上面的间隔周期执行。</span>
+          <span class="muted small" id="addsync-note">开启「自动同步」的条目按这个周期后台轮询。</span>
         </div>
       </div>
     </div>

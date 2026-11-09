@@ -304,10 +304,6 @@
 
   function renderConfig() {
     el('f-region').value = config.region || 'cn';
-    var sec = parseInt(config.sync_interval_seconds, 10);
-    if (isNaN(sec) || sec <= 0) sec = 300;
-    el('f-interval').value = Math.max(1, Math.round(sec / MIN_PER_MINUTE));
-    setPolling(config.polling_enabled !== false);
     var f = config.device_filter_models;
     el('f-filter').value = Array.isArray(f) ? f.join(', ') : '';
   }
@@ -326,11 +322,11 @@
   function collectConfig() {
     var out = Object.assign({}, config);
     out.region = el('f-region').value || 'cn';
-    var min = parseInt(el('f-interval').value, 10);
-    if (isNaN(min) || min < 1) min = 5;
-    if (min > 60) min = 60;
-    out.sync_interval_seconds = min * MIN_PER_MINUTE;
-    out.polling_enabled = pollingOn();
+    // 全局节奏**由条目推导**（f-interval 现在是"添加同步"表单里的值，
+    // 不再是全局设置 —— 从它读全局间隔会把最后填过的那个数字当成整体节奏）。
+    var eff = effectiveCadence();
+    out.sync_interval_seconds = eff.seconds;
+    out.polling_enabled = eff.enabled;
     out.device_filter_models = el('f-filter').value
       .split(',')
       .map(function (s) { return s.trim(); })
@@ -397,6 +393,7 @@
       if (row && row.revision !== undefined) args.revision = row.revision;
       if (e.patch.household_id !== undefined) args.household_id = e.patch.household_id;
       if (e.patch.sync_enabled !== undefined) args.sync_enabled = e.patch.sync_enabled;
+      if (e.patch.interval_seconds !== undefined) args.interval_seconds = e.patch.interval_seconds;
       return rpc('plugin.tool.call', { tool: 'account_settings', args: args, account_id: e.id })
         .then(function (res) {
           if (failed(res)) failures.push(failText(res)); else saved += 1;
@@ -553,6 +550,64 @@
     sel.disabled = false;
   }
 
+  /*
+   * 读一条账号的同步设置。
+   *
+   * ⚠ 真实形状是**嵌套**的：`{"sync":{"enabled":true,"interval_seconds":300}}`
+   * （account_store.go 的 account.Sync 是 syncSettings 结构体）。
+   * 界面此前按扁平 `a.sync_enabled` 读 —— 永远取到 undefined，于是每一行都显示
+   * 「关闭/仅手动」，实际开着也看不出来。这里两种形状都认（平台将来若改成扁平
+   * 也不会立刻坏），并以嵌套为准。
+   */
+  function accountSync(a) {
+    var s = (a && (a.sync || a.Sync)) || {};
+    var enabled;
+    if (typeof s.enabled === 'boolean') enabled = s.enabled;
+    else if (typeof a.sync_enabled === 'boolean') enabled = a.sync_enabled;
+    else enabled = false;
+    var iv = parseInt(s.interval_seconds, 10);
+    if (isNaN(iv) || iv <= 0) iv = parseInt(a.interval_seconds, 10);
+    if (isNaN(iv) || iv <= 0) iv = 300;
+    return { enabled: enabled, intervalSeconds: iv };
+  }
+
+  /** 一条同步的最终值（草稿优先于服务端返回）。 */
+  function entryValue(a) {
+    var d = draftEdits[a.account_id || ''] || {};
+    var base = accountSync(a);
+    return {
+      householdId: d.household_id !== undefined ? d.household_id : (a.household_id || ''),
+      enabled: d.sync_enabled !== undefined ? d.sync_enabled : base.enabled,
+      intervalSeconds: d.interval_seconds !== undefined ? d.interval_seconds : base.intervalSeconds
+    };
+  }
+
+  /*
+   * 由**条目**推导全局节奏（宿主只注册一个后台任务）。
+   *
+   * 每条同步各有自己的周期（用户口径：在「添加同步」里设定），但宿主只有一个
+   * account-sync 任务 —— 所以取"最勤快的那条"作为任务周期：这样没有任何一条
+   * 会被饿着（取最慢的会让勤快的条目失效，取平均则两边都不对）。
+   * 一条自动同步都没有 ⇒ 不注册任务（polling_enabled=false）。
+   */
+  function effectiveCadence() {
+    var minSec = 0;
+    var any = false;
+    accountsCache.forEach(function (a) {
+      var v = entryValue(a);
+      if (!v.householdId || !v.enabled) return;
+      any = true;
+      if (minSec === 0 || v.intervalSeconds < minSec) minSec = v.intervalSeconds;
+    });
+    if (!any) return { enabled: false, seconds: fallbackInterval() };
+    return { enabled: true, seconds: minSec };
+  }
+
+  function fallbackInterval() {
+    var sec = parseInt(config.sync_interval_seconds, 10);
+    return (isNaN(sec) || sec < 60) ? 300 : sec;
+  }
+
   function renderSyncRows(items, names) {
     var box = el('sync-rows');
     box.innerHTML = '';
@@ -563,9 +618,7 @@
      * 账号在同步这里没有可执行的事，把它列进来只会让人以为它已经在同步。
      * 账号本身仍在上面「小米账号」卡里可见、可删。
      */
-    var bound = items.filter(function (a) {
-      return !!(a.household_id || (draftEdits[a.account_id || ''] || {}).household_id);
-    });
+    var bound = items.filter(function (a) { return !!entryValue(a).householdId; });
     var cnt = el('sync-count');
     if (cnt) cnt.textContent = bound.length ? bound.length + ' 条同步' : '';
 
@@ -587,7 +640,10 @@
       b.textContent = name;
       var sub = document.createElement('span');
       var st = accountStateText(a);
-      sub.textContent = (a.region ? '区域 ' + a.region + ' · ' : '') + (st ? st.text : '');
+      // 周期是这一条的属性，行内要看得见 —— 否则用户在列表里根本不知道它会多久跑一次。
+      var mins = Math.max(1, Math.round(val.intervalSeconds / MIN_PER_MINUTE));
+      sub.textContent = (a.region ? '区域 ' + a.region + ' · ' : '') +
+        (st ? st.text + ' · ' : '') + '每 ' + mins + ' 分钟';
       left.appendChild(b);
       left.appendChild(sub);
       row.appendChild(left);
@@ -596,7 +652,7 @@
       mid.className = 'srow__h';
       var sel = document.createElement('select');
       sel.setAttribute('aria-label', '同步目标家庭');
-      fillHouseholdSelect(sel, draft.household_id !== undefined ? draft.household_id : a.household_id);
+      fillHouseholdSelect(sel, val.householdId);
       sel.addEventListener('change', function () {
         setDraft(id, { household_id: sel.value || null });
       });
@@ -606,7 +662,8 @@
       var ops = document.createElement('div');
       ops.className = 'srow__o';
 
-      var on = draft.sync_enabled !== undefined ? draft.sync_enabled : !!a.sync_enabled;
+      var val = entryValue(a);
+      var on = val.enabled;
       var swWrap = document.createElement('span');
       swWrap.className = 'switch-row';
       var sw = document.createElement('button');
@@ -710,6 +767,7 @@
     if (revision !== undefined && revision !== null) args.revision = revision;
     if (patch.household_id !== undefined) args.household_id = patch.household_id;
     if (patch.sync_enabled !== undefined) args.sync_enabled = patch.sync_enabled;
+    if (patch.interval_seconds !== undefined) args.interval_seconds = patch.interval_seconds;
     clearBanner();
     rpc('plugin.tool.call', { tool: 'account_settings', args: args, account_id: accountId })
       .then(function (res) {
@@ -729,10 +787,14 @@
     addTile(tiles, sync.devices || 0, '云端设备', '');
     addTile(tiles, sync.controllable || 0, '可本地控制', 'ok');
     addTile(tiles, sync.uncontrollable || 0, '不可控', 'warn');
-    // 第 4 格是"本次新增"：只有手动同步过才有值（那是**本次运行**的事实，
-    // 不是持久状态）。没有时显示 —，不假装是 0 —— "没同步过"与"同步了但没新增"
-    // 对用户是两个不同的结论。
-    addTile(tiles, lastSyncSummary ? (lastSyncSummary.added || 0) : '—', '本次新增', '');
+    // 第 4 格是**离线设备数**（2026-11-10 用户口径：原来那格「本次新增」换成它）。
+    //
+    // 数据来源是设备明细里的 online 标志 —— 与表格「在线状态」列**同一个判据**，
+    // 所以这一格的数字和下面表里数出来的行数一定一致（两处各算一遍必然对不上）。
+    // online 缺省视为未知，不计入离线。
+    var offline = 0;
+    (sync.device_list || []).forEach(function (d) { if (d.online === false) offline += 1; });
+    addTile(tiles, offline, '离线设备', offline > 0 ? 'warn' : '');
 
     var when = el('res-when');
     var parts = [];
@@ -1073,21 +1135,44 @@
     } else {
       note.textContent = '平台尚未提供家庭信息，暂时无法绑定家庭。';
     }
+    // 默认值取当前配置的周期与自动开关：多数情况下用户想加的就是同样的节奏，
+    // 从零填一遍是多余的动作。
+    var sec = parseInt(config.sync_interval_seconds, 10);
+    if (isNaN(sec) || sec <= 0) sec = 300;
+    el('f-interval').value = Math.max(1, Math.round(sec / MIN_PER_MINUTE));
+    setPolling(config.polling_enabled !== false);
     el('addsync-form').hidden = false;
     scheduleHeight();
   }
 
+  /*
+   * 提交「添加同步」。
+   *
+   * 「同步时间」与「自动同步」是这一条同步的属性（用户口径：在添加时设定），
+   * 与账号、家庭一起写进账号设置：
+   *   · household_id      —— 这条同步指向哪个家
+   *   · interval_seconds  —— 这条同步的周期（界面用分钟，存储用秒）
+   *   · sync_enabled      —— 是否自动
+   *
+   * 值本身先记进草稿、随页头「保存配置」一起提交（用户口径：保存公用保存配置）。
+   */
   function submitAddSync() {
     var id = el('f-sync-account').value;
     if (!id) { showBanner('请选择要绑定的账号', 'warn'); return; }
     var hh = el('f-sync-household').value;
     if (!hh) { showBanner('平台没有提供可选家庭，无法绑定', 'err'); return; }
-    var found = null;
-    for (var i = 0; i < accountsCache.length; i += 1) {
-      if ((accountsCache[i].account_id || '') === id) { found = accountsCache[i]; break; }
-    }
-    saveAccountSettingsFor(id, found ? found.revision : undefined, { household_id: hh });
+    var min = parseInt(el('f-interval').value, 10);
+    if (isNaN(min) || min < 1) min = 5;
+    if (min > 60) min = 60;
+    setDraft(id, {
+      household_id: hh,
+      interval_seconds: min * MIN_PER_MINUTE,
+      sync_enabled: pollingOn()
+    });
     el('addsync-form').hidden = true;
+    // 立刻按草稿重渲染，让"加进去了"当场可见。
+    renderSyncRows(accountsCache, accountNamesCache);
+    scheduleHeight();
   }
 
   /* ── 设备目录 / 局域网探测（2026-11-09 补：原来界面没有入口）── */
