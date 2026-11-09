@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.47",
+  "version": "2.0.0-alpha.48",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -253,7 +253,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.47：新增**插件自带配置界面**（ui/index.html）。平台曾在 66d5657 删掉 HX-MI 的专属配置页，导致账号登录/验证码/账号列表/手动同步这些核心能力没有入口，只剩通用表单的 4 个字段。按用户裁定「插件自己的界面由插件自己带」，本版把界面放回插件包内，平台零改动。",
+  "changelog": "2.0.0-alpha.48：界面修三处 —— ①深色模式配色（原来写死浅色，深色下割裂）②握手时序（端口一建立就发请求，拿到 FRAME_NOT_ATTACHED 「还没有连上平台」）③补齐缺失功能（设备目录查看/刷新、局域网探测、退出登录）。",
   "tools": [
     "regions",
     "login",

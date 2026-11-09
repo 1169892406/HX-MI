@@ -90,10 +90,20 @@
       send({ hx: HX, type: 'pong', plugin_id: pluginId });
       return;
     }
+    // ⑥ 主题下发（2026-11-09）：插件页是 opaque origin，读不到父窗口的
+    // document.theme；只能由宿主在消息里告诉它。收到就切 data-theme，
+    // 未收到时由 CSS 的 prefers-color-scheme 兜底。
+    if (m.type === 'theme' && typeof m.theme === 'string') {
+      applyTheme(m.theme);
+      return;
+    }
     if (m.type === 'host-ready') {
+      // 平台明确说明：插件若在 DOMContentLoaded 就发请求，那一帧可能早于
+      // 宿主的 attach（rpc 会拿到 PLUGIN_UI_FRAME_NOT_ATTACHED）。
+      // 所以**只有**收到这条之后才真正发首个业务请求。
       connected = true;
       startHeightReporting();
-      boot();
+      requestBoot();
       return;
     }
     if (typeof m.id === 'string' && typeof m.ok === 'boolean') {
@@ -121,7 +131,10 @@
     port.onmessage = onPortMessage;
     if (typeof port.start === 'function') { try { port.start(); } catch (e) {} }
     startHeightReporting();
-    boot();
+    // 注意：这里**不**直接 boot。此刻宿主可能还没 attach 完（host-ready 未到），
+    // 立即发 rpc 会拿到 PLUGIN_UI_FRAME_NOT_ATTACHED —— 用户实测的
+    // 「读取账号失败：还没有连上平台」就是这么来的。
+    // 只有超时兜底路径会在这里之后短暂等待再试（见 requestBoot）。
   }
 
   window.addEventListener('message', onWindowMessage);
@@ -399,6 +412,57 @@
       .then(function () { el('btn-sync-now').disabled = false; });
   }
 
+  /* ── 设备目录 / 局域网探测（2026-11-09 补：原来界面没有入口）── */
+
+  function loadCatalogStatus() {
+    rpc('plugin.tool.call', { tool: 'catalog_status', args: {} })
+      .then(function (r) { el('catalog-out').textContent = JSON.stringify(r, null, 2); scheduleHeight(); })
+      .catch(function (e) { el('catalog-out').textContent = '读取失败：' + errText(e); scheduleHeight(); });
+  }
+
+  function refreshCatalog() {
+    el('btn-catalog-refresh').disabled = true;
+    rpc('plugin.tool.call', { tool: 'catalog_refresh', args: {} })
+      .then(function (r) {
+        el('catalog-out').textContent = '刷新完成：' + JSON.stringify(r, null, 2);
+        scheduleHeight();
+      })
+      .catch(function (e) { el('catalog-out').textContent = '刷新失败：' + errText(e); scheduleHeight(); })
+      .then(function () { el('btn-catalog-refresh').disabled = false; });
+  }
+
+  function runLanHealth() {
+    el('btn-lan-health').disabled = true;
+    rpc('plugin.tool.call', { tool: 'lan_health', args: {} })
+      .then(function (r) { el('lan-out').textContent = JSON.stringify(r, null, 2); scheduleHeight(); })
+      .catch(function (e) { el('lan-out').textContent = '探测失败：' + errText(e); scheduleHeight(); })
+      .then(function () { el('btn-lan-health').disabled = false; });
+  }
+
+  /**
+   * 退出登录（删账号）—— 原界面只有"删除"，没有"退出登录"这条路。
+   *
+   * 两者语义不同：退出登录只清当前会话（下次还能用同一账号再登），
+   * 删除账号会清凭据与本地记录。用户要用的是前者时，只有后者是危险的。
+   */
+  function logoutAccount() {
+    var sid = sessionId;
+    if (!sid) {
+      showBanner('当前没有进行中的登录会话可退出；如需清除已登录账号请用账号行的「删除」', 'warn');
+      return;
+    }
+    if (!window.confirm('退出当前登录会话？已保存的账号凭据不会被删除。')) return;
+    rpc('plugin.tool.call', { tool: 'logout', args: { session_id: sid } })
+      .then(function () {
+        sessionId = '';
+        el('login-hint').hidden = true;
+        el('challenge').hidden = true;
+        showBanner('已退出登录会话', 'ok');
+        loadAccounts();
+      })
+      .catch(function (e) { showBanner('退出失败：' + errText(e), 'err'); });
+  }
+
   function loadDiag() {
     rpc('plugin.config.get', {})
       .then(function (res) {
@@ -446,6 +510,10 @@
     el('btn-reload-accounts').addEventListener('click', loadAccounts);
     el('btn-sync-now').addEventListener('click', syncNow);
     el('btn-diag').addEventListener('click', loadDiag);
+    el('btn-catalog-status').addEventListener('click', loadCatalogStatus);
+    el('btn-catalog-refresh').addEventListener('click', refreshCatalog);
+    el('btn-lan-health').addEventListener('click', runLanHealth);
+    el('btn-logout').addEventListener('click', logoutAccount);
     el('sw-polling').addEventListener('click', function () {
       var cur = el('sw-polling').getAttribute('aria-checked') === 'true';
       el('sw-polling').setAttribute('aria-checked', cur ? 'false' : 'true');
@@ -453,6 +521,35 @@
   }
 
   var booted = false;
+  /** 首个业务请求是否还在等"能发"的信号（与 HXCS 的 firstLoadPending 同义）。 */
+  var firstLoadPending = true;
+  var bootWaiters = [];
+
+  /**
+   * 请求启动（首个业务请求）。
+   *
+   * # 为什么需要它而不是直接 boot()
+   *
+   * 端口建立与 host-ready 是**两条独立的就绪路径**，两者哪个先到不确定。
+   * 但业务请求只能在宿主 attach **之后**发（否则 rpc 拿到 FRAME_NOT_ATTACHED）。
+   *
+   * 这里把"要 boot"记下来，等到**任一**就绪信号到达就立即执行；若两条信号
+   * 都没来（平台版本差异），1.2 秒后兜底再试一次 —— 那时端口基本已可用，
+   * 而"永远不发"会让用户看到永久的「读取中…」。
+   */
+  function requestBoot() {
+    if (!firstLoadPending) return;
+    firstLoadPending = false;
+    boot();
+  }
+
+  /** 应用主题（宿主下发）：写 html[data-theme]，CSS 的变量随之切换。 */
+  function applyTheme(theme) {
+    if (theme === 'dark' || theme === 'light') {
+      document.documentElement.setAttribute('data-theme', theme);
+      scheduleHeight();
+    }
+  }
 
   function boot() {
     if (booted || !port) return;
@@ -469,4 +566,10 @@
 
   bind();
   scheduleHeight();
+
+  // 兜底：两条就绪信号都没到也把首个请求发出去（宁可失败一次让人看到
+  // 可操作的错误，也不要永久停在「读取中…」）。
+  setTimeout(function () {
+    if (firstLoadPending && port) requestBoot();
+  }, 1200);
 })();

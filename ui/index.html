@@ -34,6 +34,7 @@
         <b>已登录账号</b>
         <span class="spacer"></span>
         <button type="button" id="btn-reload-accounts" class="btn btn--sm">刷新</button>
+        <button type="button" id="btn-logout" class="btn btn--sm">退出登录</button>
         <button type="button" id="btn-add" class="btn btn--sm btn--primary">添加账号</button>
       </div>
       <div id="accounts" class="accounts"><p class="muted">读取中…</p></div>
@@ -114,7 +115,40 @@
     </div>
   </section>
 
-  <!-- ── ③ 诊断 ────────────────────────────────────────────-->
+  <!-- ── ③ 设备目录（MIoT 规格缓存）──────────────────────
+       2026-11-09 补：原来界面漏了 catalog_status / catalog_refresh，
+       用户报「配置也不全」。设备目录决定"能识别哪些米家型号"，
+       不刷新会漏新设备。 -->
+  <section class="sec">
+    <h2>设备目录</h2>
+    <p class="sec__d">决定平台能识别哪些米家设备型号；由插件每月自动刷新，也可手动刷新。</p>
+    <div class="card">
+      <div class="card__hd">
+        <b>MIoT 规格缓存</b>
+        <span class="spacer"></span>
+        <button type="button" id="btn-catalog-status" class="btn btn--sm">查看</button>
+        <button type="button" id="btn-catalog-refresh" class="btn btn--sm btn--primary">刷新目录</button>
+      </div>
+      <pre id="catalog-out" class="diag">点「查看」读取缓存状态。</pre>
+    </div>
+  </section>
+
+  <!-- ── ④ 局域网探测 ─────────────────────────────────────
+       不登录也能控制局域网设备，探活结果直接回答"设备在不在线"。 -->
+  <section class="sec">
+    <h2>局域网探测</h2>
+    <p class="sec__d">对局域网内的小米设备发一次 hello 包（无令牌、无副作用），确认可达性。</p>
+    <div class="card">
+      <div class="card__hd">
+        <b>设备可达性</b>
+        <span class="spacer"></span>
+        <button type="button" id="btn-lan-health" class="btn btn--sm">立即探测</button>
+      </div>
+      <pre id="lan-out" class="diag">点「立即探测」查看结果。</pre>
+    </div>
+  </section>
+
+  <!-- ── ⑤ 诊断 ────────────────────────────────────────────-->
   <section class="sec">
     <h2>诊断</h2>
     <div class="card">
