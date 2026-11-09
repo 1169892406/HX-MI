@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.56",
+  "version": "2.0.0-alpha.57",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -149,6 +149,12 @@
       "min_interval_ms": 200
     },
     "http": {
+      "allowed_hosts": [
+        "account.xiaomi.com",
+        "cn.account.xiaomi.com",
+        "sts.api.io.mi.com",
+        "api.io.mi.com"
+      ],
       "cookie_exports": [
         {
           "host": "account.xiaomi.com",
@@ -258,7 +264,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.56：**根修插件自带界面全部失效**。app.js 的协议常量写成字符串「homex.plugin.ui/1」，而平台发的是数字 1（PLUGIN_UI_PROTOCOL = 1）。每一处守卫都是严格比较 m.hx !== HX ⇒ 平台发来的**每一帧都被丢弃**：connect 不建端口、host-ready 不触发首个请求、RPC 应答永远收不到。用户看到的一切（账号列表卡「读取中…」、点登录报 PLUGIN_UI_FRAME_NOT_ATTACHED、界面「全都不对」）都源于这一个字符差异。HXCS 写的是 var HX = 1，所以一直正常。已改为 1，并用桩环境验证握手全通。",
+  "changelog": "2.0.0-alpha.57：声明自身出站域名（resources.http.allowed_hosts）。此前出站白名单只来自部署配置，于是登录会被「主机 account.xiaomi.com 不在部署允许清单内」拦下，而运维得手工加域名。现在插件自己声明 account.xiaomi.com / cn.account.xiaomi.com / sts.api.io.mi.com / api.io.mi.com，平台并入部署清单（部署清单只能加、不能被插件削减），部署侧零配置。",
   "tools": [
     "regions",
     "login",
