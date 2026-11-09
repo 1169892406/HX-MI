@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.48",
+  "version": "2.0.0-alpha.49",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -218,13 +218,18 @@
     "properties": {
       "region": {
         "type": "string",
-        "default": "cn"
+        "default": "cn",
+        "title": "区域",
+        "description": "小米账号所在区域；选项由插件的 regions 工具提供。",
+        "x-options-from": "regions"
       },
       "sync_interval_seconds": {
         "type": "integer",
         "minimum": 60,
-        "maximum": 86400,
-        "default": 300
+        "maximum": 3600,
+        "default": 300,
+        "title": "同步间隔（秒）",
+        "description": "后台拉取云端设备列表的间隔。数字带上下界 ⇒ 平台渲染为滑块。"
       },
       "polling_enabled": {
         "type": "boolean",
@@ -239,7 +244,7 @@
         },
         "default": [],
         "title": "设备型号过滤",
-        "description": "非空时只同步 model 以这些前缀开头的设备；留空同步全部。"
+        "description": "非空时只同步 model 以这些前缀开头的设备；留空同步全部。逗号分隔。"
       }
     }
   },
@@ -253,7 +258,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.48：界面修三处 —— ①深色模式配色（原来写死浅色，深色下割裂）②握手时序（端口一建立就发请求，拿到 FRAME_NOT_ATTACHED 「还没有连上平台」）③补齐缺失功能（设备目录查看/刷新、局域网探测、退出登录）。",
+  "changelog": "2.0.0-alpha.49：**默认改用平台通用表单**（配置项已由平台 selector 能力完整表达：区域用 regions 工具做动态下拉、同步间隔用滑块、设备过滤用列表输入）；自带界面**保留**为备用（页头「切换到插件原生界面」），因为账号登录/验证码是多步流程，通用表单表达不了。动作类能力（状态/账号列表/目录刷新/局域网探测/立即同步）由平台的「插件操作」区块自动生成按钮。",
   "tools": [
     "regions",
     "login",
