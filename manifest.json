@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.57",
+  "version": "2.0.0-alpha.58",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -264,7 +264,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.57：声明自身出站域名（resources.http.allowed_hosts）。此前出站白名单只来自部署配置，于是登录会被「主机 account.xiaomi.com 不在部署允许清单内」拦下，而运维得手工加域名。现在插件自己声明 account.xiaomi.com / cn.account.xiaomi.com / sts.api.io.mi.com / api.io.mi.com，平台并入部署清单（部署清单只能加、不能被插件削减），部署侧零配置。",
+  "changelog": "2.0.0-alpha.58：自带界面按方案 A「柔和卡片」重做。① 同步区改为同步条目列表（一条 = 账号 → 家庭，可添加/删除），「同步时间」与「自动同步」收进列表内（列表内共用一份：宿主只维持一个云端会话，每行各写一个周期会是不生效的假承诺）；② 保存收敛到页头「保存配置」一处（插件配置 + 各条账号设置一次提交，有未保存改动时按钮与列表都有提示）；③ 「＋ 添加同步」放卡头右上角（与「添加账号」同位），「退出登录」移入账号行内；④ 同步结果用大数字磁贴（云端设备/可本地控制/不可控/本次新增）+ 常驻设备表。⑤ 修 `[hidden]` 被组件 display 压过导致的空提示条。",
   "tools": [
     "regions",
     "login",

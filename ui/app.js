@@ -49,6 +49,17 @@
   var seq = 0;
   var pluginId = '';
 
+  /* 账号清单缓存（同步行、添加同步表单都要用它；loadAccounts 填充） */
+  var accountsCache = [];
+  var accountNamesCache = {};
+  /* 当前家庭（平台经 config.get 下发；为 null 时家庭列回落显示 id） */
+  var household = null;
+  /* 上一次**手动同步**的摘要（新增/更新/云端数）。只用于"本次新增"这一格。 */
+  var lastSyncSummary = null;
+  /* 未保存的账号级改动：account_id → {household_id?, sync_enabled?}。 */
+  var draftEdits = {};
+  var dirty = false;
+
   /* 登录会话状态（session_id 由 login 返回，后续 status/verify 要用） */
   var sessionId = '';
   /* 当前配置（config.get 的结果，保存时整体回写） */
@@ -282,20 +293,44 @@
 
   /* ── 配置读写 ──────────────────────────────────────────── */
 
+  /*
+   * 同步间隔在**界面**上用「分钟」，配置里存「秒」。
+   *
+   * 为什么：用户口径与既有设计都是「每 N 分钟」（mockup 的标题行写的是"每 5 分钟"）。
+   * 秒是存储单位，不该出现在界面上 —— 之前那个"同步间隔（秒）"让人要自己换算。
+   * 换算只在这两个函数里做，别处一律用分钟。
+   */
+  var MIN_PER_MINUTE = 60;
+
   function renderConfig() {
     el('f-region').value = config.region || 'cn';
-    el('f-interval').value = config.sync_interval_seconds || 300;
-    el('sw-polling').setAttribute('aria-checked', config.polling_enabled === false ? 'false' : 'true');
+    var sec = parseInt(config.sync_interval_seconds, 10);
+    if (isNaN(sec) || sec <= 0) sec = 300;
+    el('f-interval').value = Math.max(1, Math.round(sec / MIN_PER_MINUTE));
+    setPolling(config.polling_enabled !== false);
     var f = config.device_filter_models;
     el('f-filter').value = Array.isArray(f) ? f.join(', ') : '';
+  }
+
+  /** 自动同步开关（全局：驱动宿主后台任务的 polling_enabled）。 */
+  function setPolling(on) {
+    el('sw-polling').setAttribute('aria-checked', on ? 'true' : 'false');
+    el('polling-row').setAttribute('data-on', on ? '1' : '0');
+    el('polling-t').textContent = on ? '自动同步' : '仅手动';
+  }
+
+  function pollingOn() {
+    return el('sw-polling').getAttribute('aria-checked') === 'true';
   }
 
   function collectConfig() {
     var out = Object.assign({}, config);
     out.region = el('f-region').value || 'cn';
-    var iv = parseInt(el('f-interval').value, 10);
-    out.sync_interval_seconds = isNaN(iv) ? 300 : iv;
-    out.polling_enabled = el('sw-polling').getAttribute('aria-checked') === 'true';
+    var min = parseInt(el('f-interval').value, 10);
+    if (isNaN(min) || min < 1) min = 5;
+    if (min > 60) min = 60;
+    out.sync_interval_seconds = min * MIN_PER_MINUTE;
+    out.polling_enabled = pollingOn();
     out.device_filter_models = el('f-filter').value
       .split(',')
       .map(function (s) { return s.trim(); })
@@ -303,18 +338,99 @@
     return out;
   }
 
+  /*
+   * 保存配置（页头**唯一**的保存入口，2026-11-10 用户口径）。
+   *
+   * 一次点击要提交两处状态：
+   *   ① 插件配置（区域 / 同步间隔 / 自动同步 / 型号过滤）→ plugin.config.save
+   *   ② 列表里的账号级改动（家庭 / 自动同步）→ 逐条 account_settings
+   *
+   * 顺序上先存配置：配置里含 `sync_interval_seconds`，平台会据此重新下发配置并
+   * 让宿主按新周期调度；账号级改动随后各存一次（带各自 revision，避免覆盖）。
+   *
+   * 失败要**分别**说：账号设置失败不该让人以为整份配置也没保存 —— 那是两件事，
+   * 而且只有一处需要重试。
+   */
   function saveConfig() {
     el('btn-save').disabled = true;
     clearBanner();
+    var edits = [];
+    for (var id in draftEdits) {
+      if (Object.prototype.hasOwnProperty.call(draftEdits, id)) edits.push({ id: id, patch: draftEdits[id] });
+    }
     rpc('plugin.config.save', { config: collectConfig() })
       .then(function () {
-        showBanner('配置已保存（热生效）', 'ok');
+        if (!edits.length) return { saved: 0, failed: [] };
+        return applyAccountEdits(edits);
+      })
+      .then(function (r) {
+        draftEdits = {};
+        markDirty(false);
+        if (r.failed.length) {
+          showBanner('配置已保存，但 ' + r.failed.length + ' 条账号设置未保存：' + r.failed[0], 'warn');
+        } else {
+          showBanner('配置已保存（热生效）' + (r.saved ? '，含 ' + r.saved + ' 条账号设置' : ''), 'ok');
+        }
+        loadAccounts();
       })
       .catch(function (e) { showBanner('保存失败：' + errText(e), 'err'); })
-      .then(function () { el('btn-save').disabled = false; });
+      .then(function () {
+        el('btn-save').disabled = false;
+        markDirty(dirty && Object.keys(draftEdits).length > 0);
+      });
+  }
+
+  /** 逐条提交账号级改动。串行：同一账号的多次改动会互相覆盖 revision。 */
+  function applyAccountEdits(edits) {
+    var saved = 0;
+    // 名字刻意不叫 failed：本文件里 `failed(res)` 是"业务失败帧"的判定函数，
+    // 用同名局部变量会把它遮住（写这段时就是这么踩了一下）。
+    var failures = [];
+    function step(i) {
+      if (i >= edits.length) return { saved: saved, failed: failures };
+      var e = edits[i];
+      var row = null;
+      for (var k = 0; k < accountsCache.length; k += 1) {
+        if ((accountsCache[k].account_id || '') === e.id) { row = accountsCache[k]; break; }
+      }
+      var args = { account_id: e.id };
+      if (row && row.revision !== undefined) args.revision = row.revision;
+      if (e.patch.household_id !== undefined) args.household_id = e.patch.household_id;
+      if (e.patch.sync_enabled !== undefined) args.sync_enabled = e.patch.sync_enabled;
+      return rpc('plugin.tool.call', { tool: 'account_settings', args: args, account_id: e.id })
+        .then(function (res) {
+          if (failed(res)) failures.push(failText(res)); else saved += 1;
+          return step(i + 1);
+        })
+        .catch(function (err) { failures.push(errText(err)); return step(i + 1); });
+    }
+    return Promise.resolve(step(0)).then(function (r) { return r || { saved: saved, failed: failures }; });
   }
 
   /* ── 账号列表 ──────────────────────────────────────────── */
+
+  /*
+   * 账号状态文案（v2 多账号的 state 枚举 → 用户看得懂的字）。
+   *
+   * 为什么单独列：state 是**机器值**（ready/ready_unbound/auth_required…），
+   * 直接显示会让用户看到"ready_unbound"这种内部措辞；而全角中文映射放这里
+   * 一处，将来加状态也只改一张表。
+   */
+  var ACCOUNT_STATE_TEXT = {
+    pending_login: { text: '登录中', warn: true },
+    ready_unbound: { text: '待绑定家庭', warn: true },
+    ready: { text: '就绪', warn: false },
+    auth_required: { text: '需重新登录', warn: true },
+    disabled: { text: '已停用', warn: true },
+    deleting: { text: '删除中', warn: true },
+    error: { text: '异常', warn: true }
+  };
+
+  function accountStateText(a) {
+    var raw = (a && (a.state || a.State)) || '';
+    if (!raw) return null;
+    return ACCOUNT_STATE_TEXT[raw] || { text: String(raw), warn: true };
+  }
 
   function renderAccounts(data) {
     var box = el('accounts');
@@ -348,18 +464,26 @@
       return;
     }
     box.innerHTML = '';
+    accountsCache = items;
+    accountNamesCache = names;
     items.forEach(function (a) {
       var id = a.account_id || a.AccountID || '';
       var name = names[id] || a.masked_account || a.MaskedAccount || id;
       var row = document.createElement('div');
-      row.className = 'acc';
+      row.className = 'acct';
+
+      var ava = document.createElement('span');
+      ava.className = 'ava';
+      ava.setAttribute('aria-hidden', 'true');
+      ava.textContent = '米';
+      row.appendChild(ava);
 
       var t = document.createElement('div');
-      t.className = 'acc__t';
+      t.className = 'acct__t';
       var b = document.createElement('b');
       b.textContent = name;
       var s = document.createElement('span');
-      s.textContent = '账号 ID：' + id;
+      s.textContent = id;
       t.appendChild(b);
       t.appendChild(s);
       row.appendChild(t);
@@ -368,12 +492,24 @@
       spacer.className = 'spacer';
       row.appendChild(spacer);
 
-      var pill = document.createElement('span');
-      pill.className = 'pill' + (a.sync_enabled ? ' pill--ok' : '');
-      var dot = document.createElement('i');
-      pill.appendChild(dot);
-      pill.appendChild(document.createTextNode(a.sync_enabled ? '自动同步' : '仅手动'));
-      row.appendChild(pill);
+      var st = accountStateText(a);
+      if (st) {
+        var pill = document.createElement('span');
+        pill.className = 'pill' + (a.state === 'ready' ? ' pill--ok' : (st.warn ? ' pill--warn' : ''));
+        var dot = document.createElement('i');
+        pill.appendChild(dot);
+        pill.appendChild(document.createTextNode(st.text));
+        row.appendChild(pill);
+      }
+
+      // 退出登录放在**行内**（2026-11-10 用户口径）：它操作的是这个账号那条
+      // 会话，贴着账号比挂在卡头更好找。语义上是"清掉云端会话票据"，不是删账号。
+      var lo = document.createElement('button');
+      lo.type = 'button';
+      lo.className = 'btn btn--sm';
+      lo.textContent = '退出登录';
+      lo.addEventListener('click', function () { logoutAccount(name); });
+      row.appendChild(lo);
 
       var del = document.createElement('button');
       del.type = 'button';
@@ -384,7 +520,353 @@
 
       box.appendChild(row);
     });
+    renderSyncRows(items, names);
     scheduleHeight();
+  }
+
+  /* ── 同步：条目列表 / 结果 / 添加 ─────────────────────────
+     一条同步 = 「账号 → 家庭」。表结构照既有设计（mockup config-preview
+     与平台版 XiaomiAccountList）：账号、家庭**分列**，另有自动同步与操作列；
+     家庭可就地改（选了就存，见 saveAccountSettingsFor）。 */
+
+  /** 家庭显示名：平台没给名字时回落显示 id 的前 8 位（可核对，不误导）。 */
+  function householdName(id) {
+    if (!id) return '未绑定';
+    if (household && household.id === id && household.name) return household.name;
+    return '其他家庭（' + String(id).slice(0, 8) + '…）';
+  }
+
+  /** 家庭下拉：只能选**当前**家庭（插件是家庭作用域的，跨家庭调用平台不允许）。 */
+  function fillHouseholdSelect(sel, currentId) {
+    sel.innerHTML = '';
+    var opt = document.createElement('option');
+    if (!household) {
+      opt.value = currentId || '';
+      opt.textContent = currentId ? String(currentId).slice(0, 8) + '…' : '未绑定';
+      sel.appendChild(opt);
+      sel.disabled = true;
+      return;
+    }
+    opt.value = household.id;
+    opt.textContent = household.name;
+    sel.appendChild(opt);
+    sel.disabled = false;
+  }
+
+  function renderSyncRows(items, names) {
+    var box = el('sync-rows');
+    box.innerHTML = '';
+    /*
+     * 列表 = **同步条目**（已绑定家庭的账号），不是账号清单。
+     *
+     * 为什么这样分：一个「同步」就是"某账号 → 某家庭"这条关系。没绑定家庭的
+     * 账号在同步这里没有可执行的事，把它列进来只会让人以为它已经在同步。
+     * 账号本身仍在上面「小米账号」卡里可见、可删。
+     */
+    var bound = items.filter(function (a) {
+      return !!(a.household_id || (draftEdits[a.account_id || ''] || {}).household_id);
+    });
+    var cnt = el('sync-count');
+    if (cnt) cnt.textContent = bound.length ? bound.length + ' 条同步' : '';
+
+    if (!bound.length) {
+      var p = document.createElement('p');
+      p.className = 'muted small';
+      p.textContent = items.length
+        ? '还没有同步条目。点下面的「＋ 添加同步」把某个账号绑到一个家庭。'
+        : '还没有可同步的账号。先在上面「添加账号」登录一个小米账号。';
+      box.appendChild(p);
+      return;
+    }
+    bound.forEach(function (a) {
+      var id = a.account_id || '';
+      var name = names[id] || a.masked_account || id;
+      var draft = draftEdits[id] || {};
+
+      var row = document.createElement('div');
+      row.className = 'srow';
+
+      var left = document.createElement('div');
+      left.className = 'srow__a';
+      var b = document.createElement('b');
+      b.textContent = name;
+      var sub = document.createElement('span');
+      var st = accountStateText(a);
+      sub.textContent = (a.region ? '区域 ' + a.region + ' · ' : '') + (st ? st.text : '');
+      left.appendChild(b);
+      left.appendChild(sub);
+      row.appendChild(left);
+
+      var mid = document.createElement('div');
+      mid.className = 'srow__h';
+      var sel = document.createElement('select');
+      sel.setAttribute('aria-label', '同步目标家庭');
+      fillHouseholdSelect(sel, draft.household_id !== undefined ? draft.household_id : a.household_id);
+      sel.addEventListener('change', function () {
+        setDraft(id, { household_id: sel.value || null });
+      });
+      mid.appendChild(sel);
+      row.appendChild(mid);
+
+      var ops = document.createElement('div');
+      ops.className = 'srow__o';
+
+      var on = draft.sync_enabled !== undefined ? draft.sync_enabled : !!a.sync_enabled;
+      var swWrap = document.createElement('span');
+      swWrap.className = 'switch-row';
+      var sw = document.createElement('button');
+      sw.type = 'button';
+      sw.className = 'switch';
+      sw.setAttribute('role', 'switch');
+      sw.setAttribute('aria-checked', on ? 'true' : 'false');
+      sw.appendChild(document.createElement('i'));
+      if (on) swWrap.setAttribute('data-on', '1');
+      var swT = document.createElement('span');
+      swT.textContent = on ? '开启' : '关闭';
+      sw.addEventListener('click', function () {
+        var next = sw.getAttribute('aria-checked') !== 'true';
+        setDraft(id, { sync_enabled: next });
+        sw.setAttribute('aria-checked', next ? 'true' : 'false');
+        swT.textContent = next ? '开启' : '关闭';
+        if (next) swWrap.setAttribute('data-on', '1'); else swWrap.removeAttribute('data-on');
+      });
+      swWrap.appendChild(sw);
+      swWrap.appendChild(swT);
+      ops.appendChild(swWrap);
+
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn--sm';
+      btn.textContent = '手动同步';
+      btn.addEventListener('click', function () { syncNowFor(id, btn); });
+      ops.appendChild(btn);
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn btn--sm btn--danger';
+      del.textContent = '删除';
+      del.addEventListener('click', function () { removeSyncEntry(a, name); });
+      ops.appendChild(del);
+
+      row.appendChild(ops);
+      box.appendChild(row);
+    });
+  }
+
+  /*
+   * 草稿机制（2026-11-10 用户口径：保存收敛到页头「保存配置」）。
+   *
+   * 列表里的改动（家庭 / 自动同步）先记在 draftEdits，**不立即发请求**；
+   * 页头「保存配置」一次性提交：插件配置 + 每条账号设置。
+   *
+   * 代价必须说清：改完不点保存就不会生效。所以两件事一起做——
+   *   ① 页头按钮加"有未保存改动"标记（见 markDirty）；
+   *   ② 列表下方给一行提示。
+   * 只做前者会让人以为按钮是装饰，只做后者会被忽略。
+   */
+  function setDraft(accountId, patch) {
+    var d = draftEdits[accountId] || {};
+    for (var k in patch) { if (Object.prototype.hasOwnProperty.call(patch, k)) d[k] = patch[k]; }
+    draftEdits[accountId] = d;
+    markDirty(true);
+  }
+
+  function markDirty(on) {
+    dirty = !!on;
+    var btn = el('btn-save');
+    btn.textContent = dirty ? '保存配置 •' : '保存配置';
+    btn.title = dirty ? '有未保存的改动' : '';
+    var hint = el('dirty-hint');
+    if (hint) hint.hidden = !dirty;
+  }
+
+  /*
+   * 删除一条同步 = **解绑家庭**（不删账号凭据）。
+   *
+   * 为什么不复用「删除账号」：那是销毁凭据、要重新登录；用户想清除的往往
+   * 只是"别把这个家同步进来"。两者代价差一个登录流程，必须分开并写清。
+   */
+  function removeSyncEntry(a, name) {
+    if (!window.confirm('移除同步「' + name + ' → ' + householdName(a.household_id) + '」？\n\n' +
+        '只解除这条同步关系并关闭它的自动同步；账号凭据保留，之后可以再添加回来。')) return;
+    setDraft(a.account_id || '', { household_id: null, sync_enabled: false });
+    // 立即从列表里去掉（草稿视角），让"删除"当场可见。
+    renderSyncRows(accountsCache, accountNamesCache);
+    scheduleHeight();
+  }
+
+  /*
+   * 改账号级设置（家庭 / 自动同步）。
+   *
+   * # 为什么选完就存，而不是攒到「保存配置」
+   *
+   * 「这个账号同步进哪个家」是**一条关系**，不是一份草稿：用户选了就该生效。
+   * 攒着不存会让他以为换了家庭、而下次同步仍进旧家庭（平台版实现当初就是
+   * 因为这个原因改成即时保存并回读的）。
+   *
+   * # account_id 必须显式带上
+   *
+   * account_settings 在 manifest 里声明为 `scope: "account"`，平台要求调用
+   * 上下文带 account_id（`plugin.tool.call` 的 account_id 字段）。
+   * 不带就必然撞 `账号级工具 "account_settings" 缺少 account_id`。
+   */
+  function saveAccountSettingsFor(accountId, revision, patch) {
+    var args = { account_id: accountId };
+    if (revision !== undefined && revision !== null) args.revision = revision;
+    if (patch.household_id !== undefined) args.household_id = patch.household_id;
+    if (patch.sync_enabled !== undefined) args.sync_enabled = patch.sync_enabled;
+    clearBanner();
+    rpc('plugin.tool.call', { tool: 'account_settings', args: args, account_id: accountId })
+      .then(function (res) {
+        if (failed(res)) { showBanner('设置未保存：' + failText(res), 'err'); return; }
+        showBanner('已保存', 'ok');
+        // 回读：以服务端值重渲染，避免界面停在"我以为改了"的状态。
+        loadAccounts();
+      })
+      .catch(function (e) { showBanner('设置未保存：' + errText(e), 'err'); })
+      .then(function () { scheduleHeight(); });
+  }
+
+  function renderSyncResult(view) {
+    var sync = (view && view.sync) || {};
+    var tiles = el('res-tiles');
+    tiles.innerHTML = '';
+    addTile(tiles, sync.devices || 0, '云端设备', '');
+    addTile(tiles, sync.controllable || 0, '可本地控制', 'ok');
+    addTile(tiles, sync.uncontrollable || 0, '不可控', 'warn');
+    // 第 4 格是"本次新增"：只有手动同步过才有值（那是**本次运行**的事实，
+    // 不是持久状态）。没有时显示 —，不假装是 0 —— "没同步过"与"同步了但没新增"
+    // 对用户是两个不同的结论。
+    addTile(tiles, lastSyncSummary ? (lastSyncSummary.added || 0) : '—', '本次新增', '');
+
+    var when = el('res-when');
+    var parts = [];
+    parts.push('最近同步 ' + (sync.last_ok_at ? fmtTime(sync.last_ok_at) : '尚未同步'));
+    parts.push('下次自动同步 ' + (sync.next_sync_at ? fmtTime(sync.next_sync_at) : (sync.enabled ? '计算中' : '已关闭')));
+    when.textContent = parts.join(' · ');
+
+    var pill = el('res-state');
+    pill.className = 'pill' + (sync.running ? ' pill--ok' : '');
+    el('res-state-t').textContent = sync.running ? '同步中' : '空闲';
+
+    // 连续失败与最后错误：它们才是"为什么一直没同步上"的答案，藏起来只会
+    // 让用户反复点「手动同步」。
+    var fail = el('res-fail');
+    if ((sync.consecutive_failures || 0) > 0 || sync.last_error) {
+      fail.hidden = false;
+      fail.textContent = '连续失败 ' + (sync.consecutive_failures || 0) + ' 次' +
+        (sync.last_error ? '：' + sync.last_error : '');
+    } else {
+      fail.hidden = true;
+    }
+
+    renderDeviceTable(sync.device_list || []);
+    scheduleHeight();
+  }
+
+  function addTile(box, value, label, kind) {
+    var d = document.createElement('div');
+    d.className = 'tile' + (kind ? ' tile--' + kind : '');
+    var b = document.createElement('b');
+    b.textContent = String(value);
+    var sp = document.createElement('span');
+    sp.textContent = label;
+    d.appendChild(b);
+    d.appendChild(sp);
+    box.appendChild(d);
+  }
+
+  /** 设备明细表：在线状态用 online（**不是** available —— 那是"云端是否仍可见"）。 */
+  function renderDeviceTable(list) {
+    var box = el('res-devices');
+    box.innerHTML = '';
+    if (!list.length) {
+      var p = document.createElement('p');
+      p.className = 'muted small';
+      p.textContent = '暂无设备结果。手动同步一次后这里会列出云端返回的设备。';
+      box.appendChild(p);
+      return;
+    }
+    var t = document.createElement('table');
+    var thead = document.createElement('thead');
+    var htr = document.createElement('tr');
+    [['设备', ''], ['型号', ''], ['在线状态', 'col-online'], ['控制状态', 'col-ctl']].forEach(function (c) {
+      var th = document.createElement('th');
+      th.textContent = c[0];
+      if (c[1]) th.className = c[1];
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
+    t.appendChild(thead);
+    var tb = document.createElement('tbody');
+    list.forEach(function (d) {
+      var tr = document.createElement('tr');
+      var td1 = document.createElement('td');
+      var b = document.createElement('b');
+      b.textContent = d.name || d.device_key || '未命名';
+      td1.appendChild(b);
+      tr.appendChild(td1);
+
+      var td2 = document.createElement('td');
+      td2.className = 'mono';
+      td2.textContent = d.model || '—';
+      tr.appendChild(td2);
+
+      var td3 = document.createElement('td');
+      td3.className = 'col-online';
+      var ol = document.createElement('span');
+      ol.className = 'ol ' + (d.online ? 'ol--on' : 'ol--off');
+      var dot = document.createElement('i');
+      ol.appendChild(dot);
+      ol.appendChild(document.createTextNode(d.online ? '在线' : '离线'));
+      td3.appendChild(ol);
+      tr.appendChild(td3);
+
+      var td4 = document.createElement('td');
+      td4.className = 'col-ctl';
+      var tag = document.createElement('span');
+      var controllable = d.controllable !== false && !d.reason && !d.reason_text;
+      tag.className = 'tag ' + (controllable ? 'tag--ok' : 'tag--warn');
+      tag.textContent = controllable ? '可控' : ('不可控 · ' + (d.reason_text || d.reason || '原因未说明'));
+      td4.appendChild(tag);
+      tr.appendChild(td4);
+
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb);
+    box.appendChild(t);
+  }
+
+  function fmtTime(v) {
+    if (!v) return '—';
+    var d = new Date(v);
+    if (isNaN(d.getTime())) return String(v);
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  /** 读一次"同步结果"（账号工具的家庭级视图：是运行事实，不是配置）。 */
+  function loadSyncResult() {
+    rpc('plugin.tool.call', { tool: 'account', args: {} })
+      .then(function (res) {
+        if (failed(res)) {
+          el('res-devices').innerHTML = '<p class="banner banner--warn">读取同步结果失败：' +
+            esc(failText(res)) + '</p>';
+          scheduleHeight();
+          return;
+        }
+        renderSyncResult(res);
+      })
+      .catch(function (e) {
+        el('res-devices').innerHTML = '<p class="banner banner--warn">读取同步结果失败：' +
+          esc(errText(e)) + '</p>';
+        scheduleHeight();
+      });
+  }
+
+  function esc(s) {
+    return String(s === undefined || s === null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   function loadAccounts() {
@@ -534,24 +1016,83 @@
 
   /* ── 同步与诊断 ────────────────────────────────────────── */
 
-  function syncNow() {
-    el('btn-sync-now').disabled = true;
-    rpc('plugin.tool.call', { tool: 'account_sync', args: {} })
+  /*
+   * 手动同步一个账号。
+   *
+   * `account_sync` 在 manifest 里是 `scope: "account"` —— 必须显式带 account_id，
+   * 否则平台回 `账号级工具 "account_sync" 缺少 account_id`（用户实测过的那条）。
+   *
+   * 同步完成后**重读账号与同步结果**：只显示一句"同步完成"而不刷新列表，
+   * 用户看到的是"同步了但设备列表没动"—— 那正是旧实现的观感问题。
+   */
+  function syncNowFor(accountId, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
+    clearBanner();
+    var args = accountId ? { account_id: accountId } : {};
+    var payload = { tool: 'account_sync', args: args };
+    if (accountId) payload.account_id = accountId;
+    rpc('plugin.tool.call', payload)
       .then(function (res) {
-        var h = el('sync-hint');
-        h.hidden = false;
         // 业务失败帧与"状态不是 succeeded"是两件不同的事，都要如实说。
         if (failed(res)) {
-          h.textContent = '同步失败：' + failText(res);
+          showBanner('同步失败：' + failText(res), 'err');
         } else if (res && res.state === 'succeeded') {
-          h.textContent = '同步完成：' + JSON.stringify(res.summary || {});
+          var sum = res.summary || {};
+          lastSyncSummary = sum;
+          showBanner('同步完成：云端 ' + (sum.cloud || 0) + ' 台 · 新增 ' + (sum.added || 0) +
+            ' · 更新 ' + (sum.updated || 0) + (sum.failed ? ' · 失败 ' + sum.failed : ''), 'ok');
         } else {
-          h.textContent = '同步失败：' + ((res && res.error) || '原因未提供');
+          showBanner('同步失败：' + ((res && res.error) || '原因未提供'), 'err');
         }
-        scheduleHeight();
+        loadSyncResult();
+        loadAccounts();
       })
       .catch(function (e) { showBanner('同步失败：' + errText(e), 'err'); })
-      .then(function () { el('btn-sync-now').disabled = false; });
+      .then(function () {
+        if (btn) { btn.disabled = false; btn.textContent = '手动同步'; }
+        scheduleHeight();
+      });
+  }
+
+  /* ── 添加同步（把某个已有账号绑到当前家庭）─────────────────
+     语义与「添加账号」不同：那个是**登录一个新账号**，这个是把**已有账号**
+     指到某个家庭。平台的插件调用是家庭作用域的，所以家庭下拉只有当前家庭。 */
+  function openAddSync() {
+    var accSel = el('f-sync-account');
+    accSel.innerHTML = '';
+    if (!accountsCache.length) {
+      showBanner('还没有账号可绑定。先在上面「添加账号」登录一个小米账号。', 'warn');
+      return;
+    }
+    accountsCache.forEach(function (a) {
+      var id = a.account_id || '';
+      var opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = accountNamesCache[id] || a.masked_account || id;
+      accSel.appendChild(opt);
+    });
+    fillHouseholdSelect(el('f-sync-household'), '');
+    var note = el('addsync-note');
+    if (household) {
+      note.textContent = '同一账号可同步到多个家庭；这里绑定的是当前家庭「' + household.name + '」。';
+    } else {
+      note.textContent = '平台尚未提供家庭信息，暂时无法绑定家庭。';
+    }
+    el('addsync-form').hidden = false;
+    scheduleHeight();
+  }
+
+  function submitAddSync() {
+    var id = el('f-sync-account').value;
+    if (!id) { showBanner('请选择要绑定的账号', 'warn'); return; }
+    var hh = el('f-sync-household').value;
+    if (!hh) { showBanner('平台没有提供可选家庭，无法绑定', 'err'); return; }
+    var found = null;
+    for (var i = 0; i < accountsCache.length; i += 1) {
+      if ((accountsCache[i].account_id || '') === id) { found = accountsCache[i]; break; }
+    }
+    saveAccountSettingsFor(id, found ? found.revision : undefined, { household_id: hh });
+    el('addsync-form').hidden = true;
   }
 
   /* ── 设备目录 / 局域网探测（2026-11-09 补：原来界面没有入口）── */
@@ -599,13 +1140,15 @@
    * 两者语义不同：退出登录只清当前会话（下次还能用同一账号再登），
    * 删除账号会清凭据与本地记录。用户要用的是前者时，只有后者是危险的。
    */
-  function logoutAccount() {
+  function logoutAccount(who) {
     var sid = sessionId;
     if (!sid) {
-      showBanner('当前没有进行中的登录会话可退出；如需清除已登录账号请用账号行的「删除」', 'warn');
+      showBanner('当前没有进行中的登录会话可退出；如需清除已保存的账号请用该行的「删除」', 'warn');
       return;
     }
-    if (!window.confirm('退出当前登录会话？已保存的账号凭据不会被删除。')) return;
+    if (!window.confirm('退出「' + (who || '当前账号') + '」的登录？\n\n' +
+        '这会清除云端会话（Cookie 票据与会话密钥），已保存的账号条目仍然保留；' +
+        '需要时重新登录即可。')) return;
     rpc('plugin.tool.call', { tool: 'logout', args: { session_id: sid } })
       .then(function () {
         sessionId = '';
@@ -661,17 +1204,24 @@
     el('btn-login').addEventListener('click', startLogin);
     el('btn-verify').addEventListener('click', submitVerify);
     el('btn-verify-web').addEventListener('click', submitVerifyWeb);
-    el('btn-reload-accounts').addEventListener('click', loadAccounts);
-    el('btn-sync-now').addEventListener('click', syncNow);
+    el('btn-reload-accounts').addEventListener('click', function () { loadAccounts(); loadSyncResult(); });
     el('btn-diag').addEventListener('click', loadDiag);
+    el('btn-add-sync').addEventListener('click', function () {
+      // 已展开时再点＝收起（同一个按钮两种状态，不需要额外的取消入口）。
+      var f = el('addsync-form');
+      if (!f.hidden) { f.hidden = true; scheduleHeight(); return; }
+      openAddSync();
+    });
+    el('btn-add-sync-cancel').addEventListener('click', function () {
+      el('addsync-form').hidden = true;
+      scheduleHeight();
+    });
+    el('btn-add-sync-ok').addEventListener('click', submitAddSync);
     el('btn-catalog-status').addEventListener('click', loadCatalogStatus);
     el('btn-catalog-refresh').addEventListener('click', refreshCatalog);
     el('btn-lan-health').addEventListener('click', runLanHealth);
-    el('btn-logout').addEventListener('click', logoutAccount);
-    el('sw-polling').addEventListener('click', function () {
-      var cur = el('sw-polling').getAttribute('aria-checked') === 'true';
-      el('sw-polling').setAttribute('aria-checked', cur ? 'false' : 'true');
-    });
+    // 「退出登录」已移进账号行（每行一个），绑定在 renderAccounts 里 —— 卡头不再有该按钮。
+    el('sw-polling').addEventListener('click', function () { setPolling(!pollingOn()); });
   }
 
   var booted = false;
@@ -722,10 +1272,15 @@
      * 现在各自独立发起，任一失败都不拖累另一个。
      */
     loadAccounts();
+    loadSyncResult();
     rpc('plugin.config.get', {})
       .then(function (res) {
         config = (res && res.config) || {};
+        // 当前家庭由平台下发（id + 显示名）。没有时家庭列回落显示 id 前 8 位 ——
+        // 不假装知道名字。见平台 PluginUiHost 的 household 注释。
+        household = (res && res.household) || null;
         renderConfig();
+        loadAccounts();
         scheduleHeight();
       })
       .catch(function (e) { showBanner('读取配置失败：' + errText(e), 'err'); });

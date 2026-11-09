@@ -23,29 +23,26 @@
 
   <div id="banner" class="banner" hidden></div>
 
-  <!-- ── ① 账号 ────────────────────────────────────────────-->
+  <!-- ── ① 小米账号 ────────────────────────────────────────-->
   <section class="sec">
-    <h2>小米账号</h2>
+    <div class="sec__hd"><span class="dot"></span><h2>小米账号</h2></div>
     <p class="sec__d">账号用于读取云端设备列表；局域网设备无需登录即可控制。</p>
 
-    <!-- 已登录账号列表：一直显示（空态也显示一行说明，不是隐藏整块） -->
     <div class="card">
-      <div class="card__hd">
+      <div class="row-hd">
         <b>已登录账号</b>
         <span class="spacer"></span>
         <button type="button" id="btn-reload-accounts" class="btn btn--sm">刷新</button>
-        <button type="button" id="btn-logout" class="btn btn--sm">退出登录</button>
         <button type="button" id="btn-add" class="btn btn--sm btn--primary">添加账号</button>
       </div>
       <div id="accounts" class="accounts"><p class="muted">读取中…</p></div>
     </div>
 
-    <!-- 登录表单：点"添加账号"展开（默认收起但按钮常显） -->
+    <!-- 登录表单：点「添加账号」展开（已登录时也能展开 —— 那是"再加一个账号"）-->
     <div id="login-form" class="card" hidden>
-      <div class="card__hd"><b>登录小米账号</b></div>
       <div class="form">
         <label>
-          <span>账号（手机号/邮箱/账号 ID）</span>
+          <span>账号（手机号 / 邮箱 / 账号 ID）</span>
           <input type="text" id="f-user" autocomplete="username" placeholder="手机号 或 账号 ID">
         </label>
         <label>
@@ -62,27 +59,30 @@
           <button type="button" id="btn-login" class="btn btn--primary">登录</button>
           <button type="button" id="btn-cancel-login" class="btn">取消</button>
         </div>
-        <p id="login-hint" class="muted" hidden></p>
+        <!-- 登录结果提示位（失败原因 / 是否有挑战步骤）。放在表单里而不是顶部横幅：
+             它讲的是"这次登录怎么了"，贴着发起它的按钮更好找。 -->
+        <p id="login-hint" class="muted small" hidden></p>
       </div>
     </div>
 
-    <!-- 验证挑战：need_verify / need_captcha 时展开 -->
+    <!-- 验证码 / 二次验证 -->
     <div id="challenge" class="card" hidden>
-      <div class="card__hd"><b id="ch-title">需要验证</b></div>
       <div class="form">
-        <p id="ch-desc" class="muted"></p>
-        <img id="ch-img" alt="验证码" hidden>
         <label>
           <span id="ch-label">验证码</span>
           <input type="text" id="f-code" inputmode="numeric" placeholder="输入验证码">
         </label>
-        <label id="ch-web-row" hidden>
-          <span>或粘贴网页验证链接</span>
+        <p id="ch-desc" class="muted small"></p>
+        <div id="ch-web-row" class="form__act">
           <input type="text" id="f-web" placeholder="https://sts.api.io.mi.com/sts?...">
-        </label>
+          <button type="button" id="btn-verify-web" class="btn" hidden>用链接验证</button>
+        </div>
         <div class="form__act">
           <button type="button" id="btn-verify" class="btn btn--primary">提交验证</button>
-          <button type="button" id="btn-verify-web" class="btn" hidden>用链接验证</button>
+        </div>
+        <div class="form__act">
+          <span id="ch-title" class="muted small"></span>
+          <img id="ch-img" alt="验证码图片" hidden style="max-width:220px;border-radius:8px">
         </div>
       </div>
     </div>
@@ -90,77 +90,117 @@
 
   <!-- ── ② 同步与设备 ──────────────────────────────────────-->
   <section class="sec">
-    <h2>同步与设备</h2>
+    <div class="sec__hd"><span class="dot"></span><h2>同步与设备</h2></div>
     <p class="sec__d">控制云端设备列表的拉取节奏与范围。</p>
+
     <div class="card">
-      <div class="form">
-        <label>
-          <span>同步间隔（秒）</span>
-          <input type="number" id="f-interval" min="60" max="86400" step="30" placeholder="300">
-        </label>
-        <label class="row-switch">
-          <span>自动同步</span>
-          <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="false"><i></i></button>
-        </label>
-        <p class="muted small">关闭后不再后台轮询云端设备列表（手动同步仍可用）。</p>
-        <label>
-          <span>设备型号过滤（逗号分隔，留空 = 全部）</span>
-          <input type="text" id="f-filter" placeholder="如 lumi.acpartner, zhimi.airpurifier">
-        </label>
-        <div class="form__act">
-          <button type="button" id="btn-sync-now" class="btn">立即同步</button>
-        </div>
-        <p id="sync-hint" class="muted small" hidden></p>
+      <div class="row-hd">
+        <b>同步</b>
+        <span class="muted small" id="sync-count"></span>
+        <span class="spacer"></span>
+        <button type="button" id="btn-add-sync" class="btn btn--sm btn--primary">＋ 添加同步</button>
       </div>
+
+      <div id="sync-rows"></div>
+
+      <!-- 列表内的共用设置：**放在列表里**，但只有一份 ——
+           宿主只维持一个云端会话（多账号并发同步尚未实现），
+           若每行各写一个周期，多出来的那些就是不会生效的假承诺。
+           页头「保存配置」统一保存，这里不再单独放保存按钮。 -->
+      <div class="sync-foot">
+        <span class="ival">
+          同步时间 每
+          <input type="number" id="f-interval" min="1" max="60" step="1" aria-label="同步间隔（分钟）">
+          分钟
+        </span>
+        <span class="switch-row" id="polling-row">
+          <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="false"><i></i></button>
+          <span id="polling-t">自动同步</span>
+        </span>
+        <span class="muted small">对所有条目生效（当前部署只维持一个云端会话）</span>
+      </div>
+
+      <!-- 未保存提示：改了条目但没点页头「保存配置」时必须看得见。
+           只靠按钮上加个"•"容易被忽略，所以这里再给一行明确的话。 -->
+      <p id="dirty-hint" class="muted small" hidden>有未保存的改动 —— 点右上角「保存配置」才会生效。</p>
+
+      <div id="addsync-form" class="addform" hidden>
+        <div class="grid2">
+          <label class="form-label" style="display:flex;flex-direction:column;gap:5px;font-size:13px">
+            <span class="muted small">小米账号</span>
+            <select id="f-sync-account"></select>
+          </label>
+          <label class="form-label" style="display:flex;flex-direction:column;gap:5px;font-size:13px">
+            <span class="muted small">HOMEX 家庭</span>
+            <select id="f-sync-household"></select>
+          </label>
+        </div>
+        <div class="form__act" style="margin-top:12px">
+          <button type="button" id="btn-add-sync-ok" class="btn btn--sm btn--primary">添加</button>
+          <button type="button" id="btn-add-sync-cancel" class="btn btn--sm">取消</button>
+          <span class="muted small" id="addsync-note">勾选「自动同步」的条目按上面的间隔周期执行。</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 同步结果：常驻（旧版就是常驻列表，不是点一下才出现） -->
+    <div class="card">
+      <div class="res__hd">
+        <b>同步结果</b>
+        <span class="when" id="res-when">尚未同步</span>
+        <span class="spacer"></span>
+        <span class="pill" id="res-state"><i></i><span id="res-state-t">空闲</span></span>
+      </div>
+      <div class="tiles" id="res-tiles"></div>
+      <div id="res-fail" class="banner banner--warn" hidden></div>
+      <div id="res-devices"></div>
+    </div>
+
+    <div class="card">
+      <label style="display:flex;flex-direction:column;gap:6px">
+        <span class="muted small">设备型号过滤（逗号分隔，留空 = 全部）</span>
+        <input type="text" id="f-filter" placeholder="如 lumi.acpartner, zhimi.airpurifier">
+      </label>
     </div>
   </section>
 
-  <!-- ── ③ 设备目录（MIoT 规格缓存）──────────────────────
-       2026-11-09 补：原来界面漏了 catalog_status / catalog_refresh，
-       用户报「配置也不全」。设备目录决定"能识别哪些米家型号"，
-       不刷新会漏新设备。 -->
+  <!-- ── ③ 设备目录 ────────────────────────────────────────-->
   <section class="sec">
-    <h2>设备目录</h2>
-    <p class="sec__d">决定平台能识别哪些米家设备型号；由插件每月自动刷新，也可手动刷新。</p>
+    <div class="sec__hd"><span class="dot"></span><h2>设备目录</h2></div>
+    <p class="sec__d">决定能识别哪些米家型号；不刷新会漏新设备。</p>
     <div class="card">
-      <div class="card__hd">
-        <b>MIoT 规格缓存</b>
-        <span class="spacer"></span>
+      <div class="mini">
+        <div class="t"><b>型号索引</b><span id="catalog-out">尚未读取</span></div>
         <button type="button" id="btn-catalog-status" class="btn btn--sm">查看</button>
         <button type="button" id="btn-catalog-refresh" class="btn btn--sm btn--primary">刷新目录</button>
       </div>
-      <pre id="catalog-out" class="diag">点「查看」读取缓存状态。</pre>
     </div>
   </section>
 
-  <!-- ── ④ 局域网探测 ─────────────────────────────────────
-       不登录也能控制局域网设备，探活结果直接回答"设备在不在线"。 -->
+  <!-- ── ④ 局域网探测 ──────────────────────────────────────-->
   <section class="sec">
-    <h2>局域网探测</h2>
-    <p class="sec__d">对局域网内的小米设备发一次 hello 包（无令牌、无副作用），确认可达性。</p>
+    <div class="sec__hd"><span class="dot"></span><h2>局域网探测</h2></div>
+    <p class="sec__d">不必登录也能发现并控制同一网段的设备。</p>
     <div class="card">
-      <div class="card__hd">
-        <b>设备可达性</b>
-        <span class="spacer"></span>
+      <div class="mini">
+        <div class="t"><b>局域网设备</b><span id="lan-out">尚未探测</span></div>
         <button type="button" id="btn-lan-health" class="btn btn--sm">立即探测</button>
       </div>
-      <pre id="lan-out" class="diag">点「立即探测」查看结果。</pre>
     </div>
   </section>
 
   <!-- ── ⑤ 诊断 ────────────────────────────────────────────-->
   <section class="sec">
-    <h2>诊断</h2>
+    <div class="sec__hd"><span class="dot"></span><h2>诊断</h2></div>
+    <p class="sec__d">排障用：原样读一份当前状态（配置、账号数、会话代次）。</p>
     <div class="card">
-      <div class="card__hd">
-        <b>运行状态</b>
-        <span class="spacer"></span>
+      <div class="mini">
+        <div class="t"><b>状态快照</b><span>含配置与会话信息，排查时贴给开发者</span></div>
         <button type="button" id="btn-diag" class="btn btn--sm">读取</button>
       </div>
-      <pre id="diag" class="diag">点「读取」查看当前状态。</pre>
+      <pre id="diag" hidden></pre>
     </div>
   </section>
 </div>
-<script src="app.js"></script>
 </body>
 </html>

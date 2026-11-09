@@ -1,170 +1,271 @@
-/* HX-MI 配置页样式（2026-11-09）
-   设计口径：与平台其它页一致的中性底色 + 单一强调色；
-   所有操作按钮常显，不做 hover-only（用户明确要求）。 */
+/* HX-MI 配置页样式（2026-11-10 重做：方案 A「柔和卡片」）
+   设计口径：
+     · 层级靠"字号 + 留白 + 极轻的分隔"建立，不靠线条和色块；
+     · 圆角大、弱边框、无重阴影；
+     · 所有操作按钮常显，不做 hover-only（用户明确要求）；
+     · 同步结果做成大数字磁贴 —— 先给结论，再给明细。 */
+
 :root {
-  --bg: #f5f6f8;
+  --bg: #f4f5f7;
   --card: #ffffff;
-  --line: #e2e4ea;
+  --card2: #f7f8fa;
+  --line: #e4e6eb;
   --text: #1f2328;
   --muted: #6b7280;
   --accent: #2563eb;
+  --accent-ink: #ffffff;
   --danger: #dc2626;
   --ok: #16a34a;
   --warn: #b45309;
-  --radius: 10px;
+  --r: 14px;
+  --r-sm: 9px;
 }
 
-/* ── 深色模式（2026-11-09 用户实测：深色下配色不对） ──────────────────
-   两条触发路径，缺一不可：
-     ① html[data-theme="dark"] —— 宿主**显式下发**（插件页拿不到父窗口的
-        document，只能用消息/属性告诉它；平台侧配套见 PluginUiHost 的 theme 帧）；
-     ② prefers-color-scheme —— 宿主没下发时的兜底（用户系统级深色偏好）。
-   只写 ② 是不够的：用户可能"平台深色、系统浅色"，那时页面会亮着刺眼。 */
+/* 深色两条触发路径，缺一不可：
+     html[data-theme="dark"] —— 宿主显式下发（插件页拿不到父窗口属性，只能消息告诉它）
+     prefers-color-scheme    —— 宿主没下发时的兜底（用户系统级深色）
+   只写后者不够：用户可能"平台深色、系统浅色"，那时页面会亮着刺眼。 */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16181d;
-    --card: #1e2128;
-    --line: #2c313b;
-    --text: #e6e8ec;
-    --muted: #9aa3af;
-    --accent: #3b82f6;
-    --danger: #f87171;
-    --ok: #4ade80;
-    --warn: #fbbf24;
+    --bg: #16181d; --card: #1e2128; --card2: #23262e; --line: #2c313b;
+    --text: #e6e8ec; --muted: #9aa3af; --accent: #3b82f6;
+    --danger: #f87171; --ok: #4ade80; --warn: #fbbf24;
   }
 }
-
 html[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #16181d;
-  --card: #1e2128;
-  --line: #2c313b;
-  --text: #e6e8ec;
-  --muted: #9aa3af;
-  --accent: #3b82f6;
-  --danger: #f87171;
-  --ok: #4ade80;
-  --warn: #fbbf24;
+  --bg: #16181d; --card: #1e2128; --card2: #23262e; --line: #2c313b;
+  --text: #e6e8ec; --muted: #9aa3af; --accent: #3b82f6;
+  --danger: #f87171; --ok: #4ade80; --warn: #fbbf24;
 }
+html[data-theme='light'] { color-scheme: light; }
 
-html[data-theme='light'] {
-  color-scheme: light;
-}
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; color-scheme: light; }
+
+/*
+ * `hidden` 属性必须真的隐藏（2026-11-10 实测踩到）。
+ *
+ * # 为什么需要这一条
+ *
+ * `[hidden]` 的 display:none 来自**浏览器默认样式表**，特异性极低 —— 只要
+ * 组件自身写了 `display`（本文件里 `.banner{display:flex}`、`.tiles{display:grid}`
+ * 都有），规则就会**压过**它，于是"hidden 的空横幅"照样占一条位置。
+ * 实测形态：同步结果卡里一条空黄条（那是本该隐藏的失败提示位）。
+ *
+ * 用 !important 是刻意的：这是对**属性语义**的兜底，不该被任何组件的
+ * display 覆盖；否则以后每加一个 display:flex 的组件都要重踩一次。
+ */
+[hidden] { display: none !important; }
+html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
         "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
-.wrap { max-width: 880px; margin: 0 auto; padding: 16px 16px 24px; }
+.wrap { max-width: 920px; margin: 0 auto; padding: 22px 24px 56px; }
+.spacer { flex: 1; }
 
-.hd { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.hd__t h1 { margin: 0; font-size: 20px; font-weight: 600; }
-.hd__t .sub { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
-.spacer { flex: 1 1 auto; }
+/* ── 页头 ─────────────────────────────────────────────── */
+.hd { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
+.hd__t h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+.hd .sub { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
+.hd .sub { margin-top: 3px; }
 
+/* ── 按钮（三档，全部常显）───────────────────────────── */
 .btn {
-  appearance: none; border: 1px solid var(--line); background: var(--card);
-  color: var(--text); border-radius: 8px; padding: 7px 14px;
-  font-size: 13px; cursor: pointer; line-height: 1.2;
+  height: 34px; padding: 0 14px; border-radius: var(--r-sm); font-size: 13px; font-weight: 500;
+  border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-family: inherit;
+  transition: background .15s, border-color .15s;
 }
-.btn:hover { background: color-mix(in srgb, var(--text) 6%, var(--card)); }
+.btn:hover { background: var(--card2); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
-.btn--primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn--primary:hover { filter: brightness(.96); }
-.btn--ghost { background: transparent; }
-.btn--sm { padding: 5px 10px; font-size: 12px; }
-.btn--danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.btn--primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn--primary:hover { filter: brightness(.95); }
+.btn--ghost { background: transparent; border-color: transparent; color: var(--muted); }
+.btn--ghost:hover { background: var(--card); color: var(--text); }
+.btn--danger { background: transparent; border-color: transparent; color: var(--danger); }
+.btn--danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.btn--sm { height: 30px; padding: 0 11px; font-size: 12.5px; border-radius: 8px; }
 
+/* ── 提示条 ───────────────────────────────────────────── */
 .banner {
-  border-radius: var(--radius); padding: 10px 12px; margin-bottom: 12px;
-  font-size: 13px; border: 1px solid transparent;
+  display: flex; align-items: center; gap: 8px; padding: 11px 14px;
+  border-radius: var(--r-sm); font-size: 13px; margin-bottom: 18px;
 }
-.banner--err { background: color-mix(in srgb, var(--danger) 12%, var(--card));
-  border-color: color-mix(in srgb, var(--danger) 34%, transparent); color: var(--danger); }
-.banner--ok { background: color-mix(in srgb, var(--ok) 12%, var(--card));
-  border-color: color-mix(in srgb, var(--ok) 34%, transparent); color: var(--ok); }
-.banner--warn { background: color-mix(in srgb, var(--warn) 12%, var(--card));
-  border-color: color-mix(in srgb, var(--warn) 34%, transparent); color: var(--warn); }
+.banner--ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
+.banner--err { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.banner--warn { background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); }
 
-.sec { margin-bottom: 18px; }
-.sec > h2 { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
-.sec__d { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+/* ── 区块 ─────────────────────────────────────────────── */
+.sec { margin-bottom: 24px; }
+.sec__hd { display: flex; align-items: center; gap: 9px; margin-bottom: 4px; }
+.sec__hd h2 { margin: 0; font-size: 15px; font-weight: 620; }
+.sec__hd .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
+.sec__d { margin: 0 0 12px; font-size: 12.5px; color: var(--muted); }
 
 .card {
   background: var(--card); border: 1px solid var(--line);
-  border-radius: var(--radius); padding: 12px; margin-bottom: 10px;
+  border-radius: var(--r); padding: 18px;
 }
-.card__hd { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.card__hd b { font-size: 13px; }
+.card + .card { margin-top: 12px; }
 
-.form { display: flex; flex-direction: column; gap: 12px; }
-.form label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
-.form label > span { color: var(--muted); font-size: 12px; }
-.form input[type=text], .form input[type=password], .form input[type=number],
-.form select {
-  width: 100%; height: 40px; padding: 0 10px; font-size: 13px;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text);
-}
-.form input:focus, .form select:focus { outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 1px; }
-.form__act { display: flex; gap: 8px; flex-wrap: wrap; }
-
-/*
- * ⚠ 必须写成 `.form label.row-switch`（2026-11-09 修「同步与设备布局不对」）。
- *
- * 原来只写 `.row-switch`，特异性是 (0,1,0)，而 `.form label` 是 (0,1,1) ——
- * 后者胜出，于是 `flex-direction: column` 生效，开关被挤到文字下方并居中，
- * 用户截图里看到的就是"自动同步"居中 + 开关单独一行。
- *
- * 用元素+类组合把特异性提到 (0,1,1) 并与 .form label 同源，才能覆盖。 */
-.form label.row-switch {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.form label.row-switch > span {
-  color: var(--text);
-  font-size: 13px;
-}
-.switch {
-  appearance: none; width: 44px; height: 26px; border-radius: 999px;
-  border: 1px solid var(--line); background: color-mix(in srgb, var(--text) 18%, var(--card)); position: relative; cursor: pointer;
-  flex: 0 0 auto; padding: 0;
-}
-.switch i {
-  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
-  border-radius: 50%; background: var(--card); transition: transform .16s ease;
-  box-shadow: 0 1px 2px rgba(0,0,0,.15);
-}
-.switch[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
-.switch[aria-checked="true"] i { transform: translateX(18px); }
-.switch:disabled { opacity: .5; cursor: not-allowed; }
-
-.accounts { display: flex; flex-direction: column; gap: 8px; }
-.acc {
-  display: flex; align-items: center; gap: 10px;
-  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
-}
-.acc__t { min-width: 0; }
-.acc__t b { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acc__t span { color: var(--muted); font-size: 12px; }
-.pill {
-  display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
-  border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px;
-}
-.pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
-.pill--ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
-.pill--ok i { background: var(--ok); }
-.pill--err { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
-.pill--err i { background: var(--danger); }
+/* 卡片内标题行：左标题 / 右操作，操作统一收在这一行 */
+.row-hd { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.row-hd > b { font-size: 13.5px; font-weight: 600; }
 
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
-.diag {
-  margin: 0; padding: 10px; background: var(--bg); border: 1px solid var(--line);
-  border-radius: 8px; font-size: 12px; line-height: 1.5;
-  white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto;
+
+/* ── 账号行 ───────────────────────────────────────────── */
+.accounts { display: flex; flex-direction: column; }
+.acct { display: flex; align-items: center; gap: 13px; }
+.acct + .acct { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.ava {
+  width: 38px; height: 38px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: #fff; font-size: 14px; font-weight: 600;
+}
+.acct__t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.acct__t b { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.acct__t span {
+  font-size: 12px; color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 状态徽标 */
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px;
+  border-radius: 999px; font-size: 12px; background: var(--card2); color: var(--muted);
+  border: 1px solid var(--line); white-space: nowrap;
+}
+.pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.pill--ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 28%, transparent);
+  background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.pill--ok i { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 14%, transparent); }
+.pill--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 28%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent); }
+
+/* ── 表单控件 ─────────────────────────────────────────── */
+input[type=text], input[type=password], input[type=number], select {
+  height: 36px; padding: 0 11px; font-size: 13px; font-family: inherit;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); color: var(--text); width: 100%;
+}
+select {
+  appearance: none; padding-right: 30px; cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M3 4.5 6 7.5 9 4.5' stroke='%239aa3af' stroke-width='1.4' fill='none' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 10px center;
+}
+input:focus, select:focus, button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset: 1px;
+}
+.form { display: flex; flex-direction: column; gap: 12px; }
+.form label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+.form label > span { color: var(--muted); font-size: 12px; }
+.form__act { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* ── 同步：时间 + 自动同步（标题行右侧统一）──────────── */
+.ival { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+.ival input[type=number] { width: 62px; height: 32px; padding: 0 8px; text-align: center; }
+
+/* 开关：常显、带文字 */
+.switch-row { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.switch {
+  appearance: none; width: 40px; height: 23px; border-radius: 999px; flex: 0 0 auto;
+  border: 0; padding: 0; background: var(--line); position: relative; cursor: pointer;
+  transition: background .16s;
+}
+.switch i {
+  position: absolute; top: 2px; left: 2px; width: 19px; height: 19px; border-radius: 50%;
+  background: #fff; transition: transform .16s; display: block;
+}
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"] i { transform: translateX(17px); }
+.switch-row[data-on="1"] { color: var(--ok); }
+.switch:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── 同步条目：一条 = 账号 → 家庭 ─────────────────────── */
+.srow {
+  display: flex; align-items: center; gap: 16px; padding: 14px;
+  border-radius: var(--r-sm); background: var(--card2);
+}
+.srow + .srow { margin-top: 10px; }
+.srow__a { flex: 1 1 34%; min-width: 150px; }
+.srow__a b { display: block; font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.srow__a span { font-size: 12px; color: var(--muted); }
+.srow__h { flex: 0 0 210px; }
+.srow__o { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+
+/* 列表内的共用设置行（同步时间 / 自动同步）：
+   与条目之间用一条浅线分开 —— 它讲的是"这一整列怎么跑"，不是某一条的属性。 */
+.sync-foot {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+#dirty-hint { margin: 10px 0 0; }
+
+/* 添加同步：虚线框（旧版位；现已在卡头，保留样式以便复用） */
+.addsync {
+  width: 100%; margin-top: 12px; height: 40px; border-radius: var(--r-sm);
+  border: 1px dashed var(--line); background: transparent; color: var(--muted);
+  font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  gap: 7px; font-family: inherit;
+}
+.addsync:hover { border-color: var(--accent); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.addform {
+  margin-top: 12px; padding: 14px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--card2);
+}
+
+/* ── 同步结果：大数字磁贴 ─────────────────────────────── */
+.res__hd { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.res__hd > b { font-size: 13.5px; font-weight: 600; }
+.res__hd .when { font-size: 12px; color: var(--muted); }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+.tile { background: var(--card2); border-radius: var(--r-sm); padding: 12px 13px; }
+.tile b { display: block; font-size: 22px; font-weight: 650; letter-spacing: -.02em; line-height: 1.15; }
+.tile span { font-size: 11.5px; color: var(--muted); }
+.tile--ok b { color: var(--ok); }
+.tile--warn b { color: var(--warn); }
+
+/* ── 表格（无竖线，行分隔极轻）────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left; font-size: 11.5px; font-weight: 500; color: var(--muted);
+  padding: 0 12px 9px; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+td { padding: 11px 12px; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
+.col-online { width: 96px; }
+.col-ctl { width: 200px; }
+
+.ol { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ol i { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; background: var(--muted); }
+.ol--on i { background: var(--ok); }
+.ol--off { color: var(--muted); }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11.5px; white-space: nowrap; }
+.tag--ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.tag--warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+
+/* ── 收尾三块（设备目录 / 局域网 / 诊断）──────────────── */
+.mini { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.mini .t { flex: 1; min-width: 180px; }
+.mini .t b { display: block; font-size: 13.5px; font-weight: 600; }
+.mini .t span { font-size: 12px; color: var(--muted); }
+pre {
+  margin: 12px 0 0; padding: 12px; border-radius: var(--r-sm); background: var(--bg);
+  font-size: 12px; color: var(--muted); overflow: auto; max-height: 150px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+}
+@media (max-width: 720px) {
+  .tiles { grid-template-columns: repeat(2, 1fr); }
+  .grid2 { grid-template-columns: 1fr; }
+  .srow { flex-wrap: wrap; }
+  .srow__h { flex: 1 1 100%; }
 }
