@@ -60,11 +60,7 @@ func refreshModelIndex(ctx *plugin.Context, force bool) (*ModelIndex, string, er
 }
 
 func catalogIndexFromCacheOrEmbedded(ctx *plugin.Context) (*ModelIndex, string, error) {
-	embedded, err := loadMIoTInstanceSnapshot()
-	if err != nil {
-		return nil, "", err
-	}
-	fallback, err := BuildModelIndex(embedded)
+	fallback, err := embeddedFallbackIndex()
 	if err != nil {
 		return nil, "", err
 	}
@@ -270,17 +266,41 @@ func writeCoverageReport(ctx *plugin.Context, r coverageReport) error {
 
 const catalogToolMinInterval = 60 * time.Second
 
+/*
+ * ## catalog_status 只读缓存元数据，**不构建索引**（2026-11-09 修 PLUGIN_TIMEOUT）
+ *
+ * 事故：本工具在 wasm 沙箱里必然超时（10s、30s 都会），随后宿主把沙箱判死，
+ * 后面 `accounts` / `status` / `lan_health` 全部报 SANDBOX_CRASH ——
+ * 用户看到"整个配置页都不对"。
+ *
+ * 真身：它调 `loadCatalogIndexForStatus` → `embeddedFallbackIndex` →
+ * 解压 + 解析**6.9MB** 的 `instances.raw.json` + 排序上万个型号。
+ * 在 wazero（软件解释执行）里这是几十秒级的操作，任何合理超时都不够。
+ *
+ * 而"目录状态"这个语义**不需要全量索引**：用户想知道的是"缓存有没有、
+ * 什么时候刷的、有多少型号"。前两项 `readCatalogCacheStatus` 已经给了
+ * （只读缓存文件，毫秒级）；型号数从**缓存文件自身**数出来即可。
+ *
+ * # 索引什么时候才构建
+ *
+ * 真正需要精确型号匹配的路径（设备同步 `catalogIndexFromCacheOrEmbedded`）
+ * 才构建，而且那里本来就有自己的超时上下文。
+ *
+ * 没有缓存时如实说"尚未构建"，并提示点「刷新目录」—— 不假装知道型号数。
+ */
 func catalogStatusTool(ctx *plugin.Context) (json.RawMessage, error) {
 	st := readCatalogCacheStatus(ctx)
-	idx, source, err := loadCatalogIndexForStatus(ctx)
-	if err != nil {
-		return nil, err
+	out := map[string]any{"cache": st}
+	// 型号数**不在这里数**：缓存里的 body 是完整快照，解析它就是前面超时的
+	// 那个 6.9MB 操作。目录状态只回答"缓存有没有 / 什么时候刷的 / 有效吗"，
+	// 型号数在真正建索引的路径里才知道（设备同步会打日志）。
+	if !st.Found {
+		out["source"] = "embedded"
+		out["note"] = "尚未构建型号索引；点「刷新目录」或在设备同步时自动构建"
+	} else {
+		out["source"] = "cache"
 	}
-	rep := coverageForIndex(ctx, idx)
-	return json.Marshal(map[string]any{
-		"cache": st, "source": source, "models": len(idx.exact),
-		"coverage": rep,
-	})
+	return json.Marshal(out)
 }
 
 func catalogRefreshTool(ctx *plugin.Context) (json.RawMessage, error) {
@@ -305,12 +325,46 @@ func catalogRefreshTool(ctx *plugin.Context) (json.RawMessage, error) {
 	})
 }
 
+/*
+ * ## 内嵌索引的进程级缓存（2026-11-09 修 PLUGIN_TIMEOUT）
+ *
+ * 事故：`catalog_status` 连续超时（10s 被宿主终止），随后 wasm 沙箱被判死，
+ * 连 `accounts` 都跟着报 SANDBOX_CRASH —— 用户看到的是"配置页全都不对"。
+ *
+ * 根因：每次调用都 `loadMIoTInstanceSnapshot()`（解析内嵌的 MIoT 目录 JSON，
+ * 上万条目）+ `BuildModelIndex`（排序 + 建两个 map）。这在 128MB / 10s 的
+ * wasm 沙箱里是重量级操作，而**它是纯静态数据**——解一次就够。
+ *
+ * 用 sync.Once 缓存：同一 wasm 实例生命周期内只解析一次。后续调用是纳秒级。
+ */
+var (
+	embeddedIndexOnce sync.Once
+	embeddedIndex     *ModelIndex
+	embeddedIndexErr  error
+)
+
+// embeddedFallbackIndex 返回内嵌目录索引，**进程内只构建一次**。
+//
+// 为什么必须缓存：`loadMIoTInstanceSnapshot()` + `BuildModelIndex()` 要解析并
+// 排序上万条 MIoT 条目。在 128MB / execution_timeout_ms 的 wasm 沙箱里每次重建，
+// `catalog_status` 会超时（实测 10s 被终止），而宿主随后判沙箱已死 —— 连
+// `accounts` 都跟着报 SANDBOX_CRASH，用户看到"配置页全都不对"。
+//
+// 这是**纯静态**内嵌数据，解一次就够；缓存后后续调用是纳秒级。
+func embeddedFallbackIndex() (*ModelIndex, error) {
+	embeddedIndexOnce.Do(func() {
+		embedded, err := loadMIoTInstanceSnapshot()
+		if err != nil {
+			embeddedIndexErr = err
+			return
+		}
+		embeddedIndex, embeddedIndexErr = BuildModelIndex(embedded)
+	})
+	return embeddedIndex, embeddedIndexErr
+}
+
 func loadCatalogIndexForStatus(ctx *plugin.Context) (*ModelIndex, string, error) {
-	embedded, err := loadMIoTInstanceSnapshot()
-	if err != nil {
-		return nil, "", err
-	}
-	fallback, err := BuildModelIndex(embedded)
+	fallback, err := embeddedFallbackIndex()
 	if err != nil {
 		return nil, "", err
 	}

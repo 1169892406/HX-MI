@@ -635,11 +635,24 @@
   function boot() {
     if (booted || !port) return;
     booted = true;
+    /*
+     * ## 账号列表必须**独立**加载（2026-11-09 修「卡在读取中」的结构性原因）
+     *
+     * 原来 `loadAccounts()` 被写在 `plugin.config.get` 的 `.then` 里。于是：
+     *   · config.get 失败（bootstrap 网络/权限错）→ 走 catch → 账号列表永不加载
+     *   · config.get 成功但 renderConfig 抛错 → then 内抛异常 → 同样不加载
+     *
+     * 表现就是「读取中…」永久停留 —— 那是 index.html 里的**初始占位**，
+     * 没有任何代码去改它。
+     *
+     * 两块数据本无依赖关系（配置文件 vs 账号清单），UI 加载也不该有。
+     * 现在各自独立发起，任一失败都不拖累另一个。
+     */
+    loadAccounts();
     rpc('plugin.config.get', {})
       .then(function (res) {
         config = (res && res.config) || {};
         renderConfig();
-        loadAccounts();
         scheduleHeight();
       })
       .catch(function (e) { showBanner('读取配置失败：' + errText(e), 'err'); });

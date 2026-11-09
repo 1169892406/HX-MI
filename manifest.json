@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.50",
+  "version": "2.0.0-alpha.53",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -250,7 +250,7 @@
   },
   "limits": {
     "max_memory_mb": 128,
-    "execution_timeout_ms": 10000,
+    "execution_timeout_ms": 30000,
     "max_storage_kb": 4096
   },
   "signature": {
@@ -258,7 +258,7 @@
     "key_id": "hx-mi-community",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.50：**修原生界面多处\"业务失败被静默\"** —— 平台把 `/invoke/` 的两种结果都翻译成帧内形状（成功=data 本体；业务失败={ok:false,kind,message}，HTTP 200），而本界面多处只认成功形状：① 账号列表卡在「读取中」；② 同步结果不显示失败原因；③ 设备目录/局域网探测把失败说成空数据；④ 登录失败被说成\"已提交\"。现在统一经 `failed()` / `failText()` 判定，失败原因如实显示。",
+  "changelog": "2.0.0-alpha.53：① accounts 在「全新安装（无主密钥、无会话、无账号文件）」时返回空列表而不是报错 —— 那是确实一个账号都没有，不是插件坏了；② 承接 alpha.52 的 catalog_status 只读缓存元数据（不再因解析 6.9MB 内嵌目录超时把沙箱拖死）。",
   "tools": [
     "regions",
     "login",

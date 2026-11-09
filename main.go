@@ -117,6 +117,19 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 	case "accounts":
 		store, err := openAccountStore(ctx)
 		if err != nil {
+			/*
+			 * ## 全新安装不该报错（2026-11-09 修「账号列表显示失败」）
+			 *
+			 * `openAccountStore` 在"没有 accounts_master_key 且没有会话材料"时
+			 * 返回错误 —— 但那正是**刚装好、还没登录过任何账号**的状态。
+			 * 把它当错误抛出去，界面会显示一条红报错，用户以为插件坏了。
+			 *
+			 * 判据：账号文件根本不存在 ⇒ 空列表（诚实：确实一个都没有）；
+			 * 文件存在却打不开 ⇒ 真错误（数据在但读不了，必须说）。
+			 */
+			if !accountFileExists(ctx) {
+				return json.Marshal(map[string]any{"accounts": []any{}, "account_names": map[string]string{}})
+			}
 			return nil, err
 		}
 		items, err := store.list()

@@ -111,7 +111,24 @@ body {
 .form input:focus, .form select:focus { outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 1px; }
 .form__act { display: flex; gap: 8px; flex-wrap: wrap; }
 
-.row-switch { flex-direction: row; align-items: center; justify-content: space-between; }
+/*
+ * ⚠ 必须写成 `.form label.row-switch`（2026-11-09 修「同步与设备布局不对」）。
+ *
+ * 原来只写 `.row-switch`，特异性是 (0,1,0)，而 `.form label` 是 (0,1,1) ——
+ * 后者胜出，于是 `flex-direction: column` 生效，开关被挤到文字下方并居中，
+ * 用户截图里看到的就是"自动同步"居中 + 开关单独一行。
+ *
+ * 用元素+类组合把特异性提到 (0,1,1) 并与 .form label 同源，才能覆盖。 */
+.form label.row-switch {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.form label.row-switch > span {
+  color: var(--text);
+  font-size: 13px;
+}
 .switch {
   appearance: none; width: 44px; height: 26px; border-radius: 999px;
   border: 1px solid var(--line); background: color-mix(in srgb, var(--text) 18%, var(--card)); position: relative; cursor: pointer;

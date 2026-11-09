@@ -66,6 +66,15 @@ func openAccountStore(ctx *plugin.Context) (*accountStore, error) {
 	key := sha256.Sum256([]byte(raw + "\x00homex.xiaomi_miot/accounts/v2"))
 	return &accountStore{ctx: ctx, key: key[:]}, nil
 }
+// accountFileExists 报告账号数据文件是否存在。
+//
+// 用途：区分"全新安装（文件都没有）"与"有数据但读不了"。前者应显示空列表，
+// 后者必须报错 —— 把前者当错误会让刚装好的用户以为插件坏了。
+func accountFileExists(ctx *plugin.Context) bool {
+	r, err := ctx.FSRead(accountsPath)
+	return err == nil && r.Found
+}
+
 func (s *accountStore) load() (accountEnvelope, error) {
 	r, err := s.ctx.FSRead(accountsPath)
 	if err != nil {
