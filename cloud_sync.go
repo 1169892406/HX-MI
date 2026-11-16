@@ -291,11 +291,36 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		 * 30s 预算吃光（`sync_now` 直接超时）。传感器数据不需要"每轮全量"，
 		 * 轮着来即可：一台/轮，5 分钟一轮，几分钟内全部覆盖一遍。
 		 */
+		/*
+		 * 需要**周期轮询状态**的设备（每轮最多 1 台，见下）：
+		 *   · 传感器（host 非空 + 型号含 sensor/gas/...）—— 没有命令可触发上报；
+		 *   · 音响/播放器 —— 云端状态滞后，命令后回读拿到的是旧值，
+		 *     只能靠"稍后再读"（2026-11-17 实测滞后一轮）。
+		 */
+		isMedia := hasCap(ds[index[external]].Capabilities, "media_player") ||
+			strings.Contains(strings.ToLower(c.Model), "speaker")
 		pollSensor := false
-		if strings.TrimSpace(c.LocalIP) != "" && isSensorLikeModel(c.Model) && summary["states"] < 1 {
-			pollSensor = true
+		if (isSensorLikeModel(c.Model) || isMedia) && summary["states"] < 1 {
+			// 传感器还要求有 LAN 地址；音响走云端，不要求。
+			if isMedia || strings.TrimSpace(c.LocalIP) != "" {
+				pollSensor = true
+			}
 		}
-		if pollSensor {
+		if pollSensor && isMedia {
+			if st, serr := cloudMediaState(ctx, ds[index[external]]); serr != nil {
+				ctx.LogWarn("hx-mi 媒体状态轮询失败（device=%s model=%s）：%v", external, c.Model, serr)
+			} else if len(st) > 0 {
+				if perr := ctx.DeviceStatePublish(plugin.DeviceStateRequest{
+					ExternalID: external, State: st,
+					ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				}); perr != nil {
+					ctx.LogWarn("hx-mi 媒体状态上报失败（device=%s）：%v", external, perr)
+				} else {
+					summary["states"]++
+				}
+			}
+		}
+		if pollSensor && !isMedia {
 			/*
 			 * 先本地、失败再云端（2026-11-17）。
 			 *

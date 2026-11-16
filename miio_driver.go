@@ -97,6 +97,48 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 	 * 下发方式：`miotspec/action` 的 turn-on / turn-off（按规格找 aiid）。
 	 * 本轮只做开关：先验证"红外到底能不能动作"，风速/温度用同一通路再扩。
 	 */
+	/*
+	 * 媒体播放器分支（2026-11-17，第 2 项）：**走云端**。
+	 *
+	 * 小爱音箱Pro 虽是 Wi-Fi 设备、`devices.json` 里也有 host+token，但实测
+	 * 局域网 miio 直连直接超时（30s 打满、沙箱被打死）—— 音箱的本地口不通，
+	 * 这也是参考实现把它们归到云端 action 的原因。
+	 *
+	 * 规格（xiaomi-lx06，已缓存）：
+	 *   svc2 volume(uint8) / mute(bool)
+	 *   svc3 actions play/pause/next/previous + playing-state(uint8)
+	 *   svc5 actions wake-up / play-music / play-text
+	 */
+	if hasCap(d.Capabilities, "media_player") {
+		if err := cloudMediaCommand(ctx, *d, cmd); err != nil {
+			return err
+		}
+		/*
+		 * ⚠ **不在命令后立刻回读**（2026-11-17 实测）。
+		 *
+		 * 云端状态滞后整整一轮：
+		 *
+		 *	设 0.2 → 立刻回读 0.7（上一轮的值）
+		 *	设 0.8 → 立刻回读 0.2（上一轮的值）
+		 *
+		 * 参考实现也是这么处理的：写完先 `asyncio.sleep(delay_update)` 再读
+		 * （init.py:1042 的 `_vars['delay_update']`，默认值见 device_customizes
+		 * 的 `cloud_delay_update: 7~10`）。立刻回读只会把**旧值**写进设备域，
+		 * 界面上看起来像"命令被还原了"——比不显示更糟。
+		 *
+		 * 所以：绝对值写入（prop/set 回 code=0 = 设备**接受**了这个值）上报写入值；
+		 * 其余状态（muted / playing）交给周期轮询（见 cloud_sync 的 poll 分支），
+		 * 那时云端的快照已经追上来了。
+		 */
+		if lv, ok := mediaAcknowledgedVolume(cmd); ok {
+			_ = ctx.DeviceStatePublish(plugin.DeviceStateRequest{
+				ExternalID: d.ExternalID,
+				State:      map[string]any{"media_player": map[string]any{"volume_level": lv}},
+				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			})
+		}
+		return nil
+	}
 	if strings.TrimSpace(d.Host) == "" {
 		switch strings.ToLower(cmd.Action) {
 		case "turn_on", "turn_off":
@@ -911,6 +953,8 @@ func cloudIRSetProp(ctx *plugin.Context, d miioDevice, nameSuffix string, value 
 	if err != nil {
 		return fmt.Errorf("无云会话（需先登录）：%w", err)
 	}
+	// 会话必须关：每次云端调用都新开一条，不关会把 http 会话配额（4 条）打满。
+	defer func() { _ = ctx.HTTPClose(sessionID) }()
 	siid, piid, ok := cloudIRProp(ctx, d.Model, nameSuffix)
 	if !ok {
 		return fmt.Errorf("型号 %s 的规格里没有 %s 属性", d.Model, nameSuffix)
@@ -957,6 +1001,8 @@ func cloudExecuteIRPower(ctx *plugin.Context, d miioDevice, on bool) error {
 	if err != nil {
 		return fmt.Errorf("无云会话（需先登录）：%w", err)
 	}
+	// 会话必须关：每次云端调用都新开一条，不关会把 http 会话配额（4 条）打满。
+	defer func() { _ = ctx.HTTPClose(sessionID) }()
 	siid, aiid, ok := cloudIRPowerAction(ctx, d.Model, on)
 	if !ok {
 		return fmt.Errorf("型号 %s 的规格里找不到 turn-on/turn-off 动作（无法经云端控制）", d.Model)
@@ -989,4 +1035,198 @@ func clipForLog(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// hasCap 判断能力列表里是否含某个能力名。
+func hasCap(caps []string, want string) bool {
+	for _, c := range caps {
+		if strings.EqualFold(c, want) {
+			return true
+		}
+	}
+	return false
+}
+
+
+// mediaAcknowledgedVolume 从一条成功的 volume_set 命令里取出"设备已接受的绝对值"。
+//
+// 只对 volume_set 成立：`prop/set` 返回 code=0 表示设备**接受**了这个确切的值，
+// 上报它不算乐观确认。相比之下 `action turn-on` 回 code=0 只说明"指令发出去了"，
+// 结果状态未知 —— 那种一律不上报。
+func mediaAcknowledgedVolume(cmd miioCommand) (float64, bool) {
+	if !strings.EqualFold(cmd.Action, "volume_set") {
+		return 0, false
+	}
+	raw, ok := cmd.Params["volume_level"]
+	if !ok {
+		raw = cmd.Params["level"]
+	}
+	lv, tok := cloudNumber(raw)
+	if !tok {
+		return 0, false
+	}
+	if lv < 0 {
+		lv = 0
+	}
+	if lv > 1 {
+		lv = 1
+	}
+	return lv, true
+}
+
+// cloudActionByName 在型号规格里按动作名后缀找 (siid, aiid)，并**经云端**执行。
+func cloudActionByName(ctx *plugin.Context, d miioDevice, nameSuffix string) error {
+	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
+	if err != nil {
+		return fmt.Errorf("无云会话（需先登录）：%w", err)
+	}
+	// 会话必须关：每次云端调用都新开一条，不关会把 http 会话配额（4 条）打满。
+	defer func() { _ = ctx.HTTPClose(sessionID) }()
+	typ, ok := lookupModelType(d.Model)
+	if !ok {
+		return fmt.Errorf("型号 %s 不在目录中", d.Model)
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return fmt.Errorf("读取规格失败：%w", err)
+	}
+	for _, svc := range sp.Services {
+		for _, a := range svc.Actions {
+			if strings.Contains(strings.ToLower(a.Type), nameSuffix) {
+				rows, aerr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "action",
+					map[string]any{"did": d.ExternalID, "siid": svc.IID, "aiid": a.IID, "in": []any{}})
+				if aerr != nil {
+					return aerr
+				}
+				for _, r := range rows {
+					if code, ok := r["code"].(float64); ok && int(code) != 0 {
+						return fmt.Errorf("设备拒绝动作（code=%d）", int(code))
+					}
+				}
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("型号 %s 的规格里没有 %s 动作", d.Model, nameSuffix)
+}
+
+// cloudMediaCommand 把平台的 media_player 动作翻成云端调用。
+//
+// 映射：media_play→play、media_pause→pause、media_next→next、media_prev→previous、
+// turn_on→wake-up（音箱没有"通电"，唤醒是语义上最接近的"开始工作"）、
+// volume_set 写 volume(0~1→0~100)。
+//
+// 明确拒绝 stop / turn_off：规格里没有 standby/stop，硬凑成 pause 会让人以为真停了。
+func cloudMediaCommand(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
+	switch strings.ToLower(cmd.Action) {
+	case "media_play", "play":
+		return cloudActionByName(ctx, d, ":play:")
+	case "media_pause", "pause":
+		return cloudActionByName(ctx, d, ":pause:")
+	case "media_next", "next":
+		return cloudActionByName(ctx, d, ":next:")
+	case "media_prev", "previous":
+		return cloudActionByName(ctx, d, ":previous:")
+	case "turn_on":
+		return cloudActionByName(ctx, d, ":wake-up:")
+	case "volume_set":
+		raw, ok := cmd.Params["volume_level"]
+		if !ok {
+			raw = cmd.Params["level"]
+		}
+		lv, tok := cloudNumber(raw)
+		if !tok {
+			return fmt.Errorf("音量参数不可用（收到 %v）", raw)
+		}
+		if lv < 0 {
+			lv = 0
+		}
+		if lv > 1 {
+			lv = 1
+		}
+		return cloudIRSetProp(ctx, d, ":volume:", int(lv*100+0.5))
+	case "turn_off", "media_stop":
+		return fmt.Errorf("音箱不支持 %s（规格里没有 standby/stop；停播放请用暂停）", cmd.Action)
+	}
+	return fmt.Errorf("不支持的媒体动作 %q", cmd.Action)
+}
+
+// cloudMediaState 经云端读音箱音量/静音/播放状态，组装成平台认的 media_player 键。
+func cloudMediaState(ctx *plugin.Context, d miioDevice) (map[string]any, error) {
+	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 会话必须关：每次云端调用都新开一条，不关会把 http 会话配额（4 条）打满。
+	defer func() { _ = ctx.HTTPClose(sessionID) }()
+	type ref struct{ key string }
+	refs := map[string]ref{}
+	var params []map[string]any
+	typ, ok := lookupModelType(d.Model)
+	if !ok {
+		return nil, fmt.Errorf("型号 %s 不在目录中", d.Model)
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return nil, err
+	}
+	for _, svc := range sp.Services {
+		for _, pr := range svc.Properties {
+			low := strings.ToLower(pr.Type)
+			var key string
+			switch {
+			case strings.Contains(low, ":volume:"):
+				key = "volume"
+			case strings.Contains(low, ":mute:"):
+				key = "mute"
+			case strings.Contains(low, ":playing-state:"):
+				key = "playing"
+			default:
+				continue
+			}
+			params = append(params, map[string]any{"did": d.ExternalID, "siid": svc.IID, "piid": pr.IID})
+			refs[fmt.Sprintf("%d.%d", svc.IID, pr.IID)] = ref{key: key}
+		}
+	}
+	if len(params) == 0 {
+		return nil, errors.New("规格里没有音量/静音/播放状态属性")
+	}
+	rows, err := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/get", params)
+	if err != nil {
+		return nil, err
+	}
+	mp := map[string]any{}
+	for _, r := range rows {
+		if code, ok := r["code"].(float64); ok && int(code) != 0 {
+			continue
+		}
+		siid, _ := r["siid"].(float64)
+		piid, _ := r["piid"].(float64)
+		rf, ok := refs[fmt.Sprintf("%d.%d", int(siid), int(piid))]
+		if !ok {
+			continue
+		}
+		switch rf.key {
+		case "volume":
+			if v, ok := r["value"].(float64); ok {
+				mp["volume_level"] = v / 100.0
+			}
+		case "mute":
+			if v, ok := r["value"].(bool); ok {
+				mp["muted"] = v
+			}
+		case "playing":
+			if v, ok := r["value"].(float64); ok {
+				if int(v) == 1 {
+					mp["state"] = "playing"
+				} else {
+					mp["state"] = "idle"
+				}
+			}
+		}
+	}
+	if len(mp) == 0 {
+		return nil, errors.New("云端没有返回媒体状态")
+	}
+	return map[string]any{"media_player": mp}, nil
 }
