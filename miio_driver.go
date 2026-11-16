@@ -119,26 +119,98 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 		method = "set_properties"
 		params = []map[string]any{{"did": d.ExternalID, "siid": siid, "piid": piid, "value": !current}}
 	}
-	state := map[string]any{"last_command": cmd.Action, "available": true}
-	if list, ok := params.([]map[string]any); ok && (method == "set_properties" || method == "get_properties" || method == "action") {
-		rows, e := miioBatchProperties(ctx, *d, token, method, list)
-		if e != nil {
-			return e
-		}
-		if method == "action" {
-			decoded, e := decodeActionOutputs(firstRow(rows), toIntSlice(cmd.Params["out"]))
+	/*
+	 * ★★★ 2026-11-16（用户「正常这个台灯还有温度数据啊，现在怎么看不见」）：
+	 *
+	 * 这里原来发的是 `{"last_command":"turn_on","available":true}` —— 那是**插件
+	 * 自己的记账**，不是能力结构。平台按 (capability, property) 存状态（
+	 * `device_states_current` 的键就是这两者），收到这种报文只能丢掉：
+	 * 界面上既没有开关态、也没有温度，命令的 acked 永远 false。
+	 *
+	 * 现在按能力结构发（契约见 pluginres.StateHandler）：
+	 *
+	 *	{"switch":{"power":true},"sensor":{"temperature":26.5}}
+	 *
+	 * 温度从哪来：本型号（如 chuangmi.plug.m3）的 MIoT 规格里
+	 * `siid=2, piid=2` 就是 temperature。读失败**不影响命令本身** ——
+	 * 开关已经切过去了，不能因为温度读不到就报错让用户以为没开成。
+	 * 所以温度单独 try，失败只记 Warn。
+	 */
+	state := map[string]any{}
+	if method == "set_properties" || method == "get_properties" || method == "action" {
+		if list, ok := params.([]map[string]any); ok {
+			rows, e := miioBatchProperties(ctx, *d, token, method, list)
 			if e != nil {
 				return e
 			}
-			state["action_out"] = decoded
+			if method == "action" {
+				decoded, e := decodeActionOutputs(firstRow(rows), toIntSlice(cmd.Params["out"]))
+				if e != nil {
+					return e
+				}
+				state["action_out"] = decoded
+			}
 		}
 	} else {
 		if _, err = miioExchange(ctx, *d, token, method, params); err != nil {
 			return err
 		}
 	}
+	// 开关态：直接用命令意图（set_properties 已成功返回，说明设备接受了）。
+	if power, ok := commandPowerIntent(cmd.Action); ok {
+		state["switch"] = map[string]any{"power": power}
+	}
+	// 温度：本机型号规格里的可选属性，读不到就跳过（不拖累命令结果）。
+	if t, ok := readTemperatureProperty(ctx, *d, token); ok {
+		state["sensor"] = map[string]any{"temperature": t}
+	}
+	if len(state) == 0 {
+		return nil
+	}
 	return ctx.DeviceStatePublish(plugin.DeviceStateRequest{ExternalID: d.ExternalID, State: state, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 }
+
+// commandPowerIntent 把"开关类动作"翻成 power 布尔值。
+//
+// toggle 不给值：它真正的结果要靠随后读属性才知道，这里不猜。
+func commandPowerIntent(action string) (bool, bool) {
+	switch strings.ToLower(action) {
+	case "turn_on":
+		return true, true
+	case "turn_off":
+		return false, true
+	}
+	return false, false
+}
+
+// readTemperatureProperty 读本设备的温度属性（MIoT `siid=2, piid=2`）。
+//
+// 为什么写死 siid/piid：`chuangmi.plug.m3` / `chuangmi.plug.m1` 这类插座的规格里，
+// 开关服务（siid=2）的 piid=1 是 on、piid=2 就是 temperature —— 已用本地缓存的
+// spec 文件核对过（spec-cache/PmT_7JG8lWBmvjZ4.json）。没有温度传感器的型号
+// 会返回错误，这里吞掉并返回 ok=false：**温度是可选增强，不能影响开关命令**。
+func readTemperatureProperty(ctx *plugin.Context, d miioDevice, token []byte) (float64, bool) {
+	rows, err := miioBatchProperties(ctx, d, token, "get_properties",
+		[]map[string]any{{"did": d.ExternalID, "siid": 2, "piid": 2}})
+	if err != nil {
+		return 0, false
+	}
+	row := firstRow(rows)
+	if row == nil {
+		return 0, false
+	}
+	if code, ok := row["code"].(float64); ok && int(code) != 0 {
+		return 0, false
+	}
+	switch v := row["value"].(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	}
+	return 0, false
+}
+
 func mapControl(c miioCommand) (string, any, error) {
 	switch strings.ToLower(c.Action) {
 	case "turn_on":

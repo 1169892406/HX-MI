@@ -184,6 +184,19 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		if len(caps) == 0 {
 			caps = []string{"sensor"}
 		}
+		/*
+		 * ★★★ 2026-11-16（用户「正常这个台灯还有温度数据啊，现在怎么看不见」）：
+		 *
+		 * 兜底投影只按型号前缀猜（`plug` → 只有 `switch`），而 `chuangmi.plug.m3`
+		 * 这类插座**规格里本来就有温度属性**（siid=2/piid=2，已用缓存 spec 核对）。
+		 * 不补上 `sensor` 能力槽，平台就没有地方存温度 —— 插件读到了也显示不出来。
+		 *
+		 * 判据用**规格本身**（而不是再写一张型号表）：规格里出现 temperature 属性
+		 * 就补 sensor。这样新型号不用改代码，只要目录能拉到规格就自动生效。
+		 */
+		if !stringInSlice(caps, "sensor") && modelHasTemperature(ctx, c.Model) {
+			caps = append(caps, "sensor")
+		}
 		host := c.LocalIP
 		name := c.Name
 		if name == "" {
@@ -334,6 +347,49 @@ func buildSyncDeviceViews(ctx *plugin.Context, cloud []cloudDeviceView, ds []mii
  * 不猜复杂能力：宁可少报（之后目录建好会覆盖成精确值），也不要漏设备。
  * 顺序有意义：先匹配更具体的（plug/light）再退到 sensor。
  */
+
+// stringInSlice 小工具（本文件用得多，避免每处手写循环）。
+func stringInSlice(list []string, target string) bool {
+	for _, v := range list {
+		if v == target {
+			return true
+		}
+	}
+	return false
+}
+
+// modelHasTemperature 判断该型号的 MIoT 规格里是否有温度属性。
+//
+// # 为什么不写死型号表
+//
+// 有温度传感器的插座/开关型号很多（chuangmi.plug.m1/m3、各类温控开关…），
+// 维护一张表必然漏。规格文件本身已经是权威 —— 目录能拉到就算数。
+//
+// # 取不到规格时返回 false
+//
+// 这是**增强**判据：拿不到规格就不要凭空加能力槽（否则又回到"能力乱报"）。
+func modelHasTemperature(ctx *plugin.Context, model string) bool {
+	if model == "" {
+		return false
+	}
+	typ, ok := lookupModelType(model)
+	if !ok {
+		return false
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return false
+	}
+	for _, svc := range sp.Services {
+		for _, pr := range svc.Properties {
+			if strings.Contains(strings.ToLower(pr.Type), "temperature") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func fallbackCapabilities(model string) []string {
 	m := strings.ToLower(model)
 	switch {
