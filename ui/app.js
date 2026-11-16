@@ -479,7 +479,7 @@
     pending_login: { text: '登录中', warn: true },
     ready_unbound: { text: '待绑定家庭', warn: true },
     ready: { text: '就绪', warn: false },
-    auth_required: { text: '需重新登录', warn: true },
+    auth_required: { text: '登录已过期，请重新登录', warn: true },
     disabled: { text: '已停用', warn: true },
     deleting: { text: '删除中', warn: true },
     error: { text: '异常', warn: true }

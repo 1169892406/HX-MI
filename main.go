@@ -174,6 +174,25 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		if err != nil {
 			return nil, err
 		}
+		/*
+		 * ★★★ 2026-11-16（用户实测截图：顶部红字「同步失败：无云会话（需先登录）」，
+		 * 而下面账号列表却标绿「就绪」——自相矛盾；用户判定「应该是 token 过期重新登录」）。
+		 *
+		 * 真因：`account.State` 只在**登录那一刻**按 `HouseholdID != ""` 写成 ready，
+		 * 之后**从不复查会话是否还能用**。于是 token 过期/密文丢失后，账号永远显示
+		 * "就绪"，用户完全没有提示该去重新登录 —— 而同步一直在失败。
+		 *
+		 * 判据必须来自**真实可用性**（能不能读出云会话密钥），而不是"曾经登录过"。
+		 * 这里只读一次会话（本地文件 + 一次 vault 解封），成本可忽略。
+		 */
+		if ok, why := cloudSessionUsable(ctx); !ok {
+			ctx.LogWarn("hx-mi 云会话不可用（账号将显示需重新登录）：%s", why)
+			for i := range items {
+				if items[i].State == "ready" || items[i].State == "ready_unbound" {
+					items[i].State = "auth_required"
+				}
+			}
+		}
 		// 顶层再给一份完整账号映射：用户明确要求账号显示完整（不要 *）。
 		// 放在独立字段而不是塞进 items 里，是为了不改变既有 wire 契约 ——
 		// items 的 masked_account 仍供需要脱敏的调用方使用。
@@ -432,6 +451,43 @@ const autoSyncScheduleName = "hxmi-auto-sync"
 // 平台的 `runSchedule` 只对"账号级工具"要求 account 上下文
 // （见 pluginsvc/events.go：非 account scope 不设置 cc.AccountID）。
 // 用账号级工具做定时目标会因"创建时未盖章"直接被跳过。
+
+// cloudSessionUsable 判断当前云会话是否**真的能用**（能解出会话密钥）。
+//
+// # 为什么需要它（2026-11-16）
+//
+// 账号状态此前只在登录那一刻写死成 ready，之后从不复查 —— token 过期或密文丢失后
+// 界面仍显示绿色的「就绪」，而同步一直在失败。用户看到的是一对自相矛盾的提示。
+//
+// 判据分三层，任一不满足即不可用：
+//  1. `cloud-session.json` 存在（否则从来没登录过）；
+//  2. 里面的票据是密封的且带 secret_ref；
+//  3. 该 secret_ref 能被 vault 解出来（这才是"token 还有效"的实际证明 ——
+//     解不开就说明密钥材料没了/轮换过，必须重新登录）。
+//
+// 返回的 why 是给日志看的人话（不进 UI，UI 用 auth_required 这个状态值）。
+func cloudSessionUsable(ctx *plugin.Context) (bool, string) {
+	r, err := ctx.FSRead("cloud-session.json")
+	if err != nil || !r.Found {
+		return false, "无 cloud-session.json（从未登录）"
+	}
+	b, err := r.Data()
+	if err != nil {
+		return false, "读取 cloud-session.json 失败：" + err.Error()
+	}
+	var saved savedCloudSession
+	if err := json.Unmarshal(b, &saved); err != nil {
+		return false, "cloud-session.json 解析失败"
+	}
+	if !saved.TicketsSealed || saved.SecretRef == "" {
+		return false, "会话票据不完整（tickets_sealed/secret_ref 缺失）"
+	}
+	if _, _, err := ctx.VaultBlobOpen(saved.SecretRef); err != nil {
+		return false, "会话密钥不可解：" + err.Error()
+	}
+	return true, ""
+}
+
 func registerAutoSyncSchedule(ctx *plugin.Context, intervalSec int) error {
 	cron, ok := cronForSeconds(intervalSec)
 	if !ok {
