@@ -745,8 +745,17 @@ func cloudNumber(v any) (float64, bool) {
 //
 // 与参考实现一致：body **只有 params**（不要 datasource，这个字段曾让 BLE
 // 读取假性失败三轮）。返回 result 数组。
+//
+// ⚠ `params` 的类型**按 api 而定**（2026-11-17 从参考实现 core/device.py:1289 确认）：
+//
+//	prop/get、prop/set → 数组 [ {...}, {...} ]
+//	action             → **单个对象** { ... }     ← 我原来一律传数组，云端回
+//	                                               `code=-8 data type not valid`
+//
+// 参考实现里 `async_do_action(pms)` 的 pms 就是一个 dict，`async_get_props(pms)`
+// 的 pms 才是 list。两种形状不能混。
 func cloudRequestMIoTSpec(ctx *plugin.Context, sessionID, ssecurity, deviceID, api string,
-	params []map[string]any) ([]map[string]any, error) {
+	params any) ([]map[string]any, error) {
 	body, err := json.Marshal(map[string]any{"params": params})
 	if err != nil {
 		return nil, err
@@ -756,18 +765,39 @@ func cloudRequestMIoTSpec(ctx *plugin.Context, sessionID, ssecurity, deviceID, a
 	if err != nil {
 		return nil, err
 	}
+	/*
+	 * `result` 的形状**按 api 而不同**（2026-11-17 实测）：
+	 *   prop/get → 数组 [ {...} ]
+	 *   action   → 单个对象（甚至可能为空）⇒ 之前按数组解会报"响应解析失败"，
+	 *              而请求其实已经被接受了（错误码从 -8 变成了这一条）。
+	 *
+	 * 所以先按 RawMessage 收，再尽力解析：数组 → 直接用；对象 → 包成单元素；
+	 * 其它/空 → 返回空切片（调用方对 action 不依赖返回值）。
+	 */
 	var resp struct {
-		Code    int              `json:"code"`
-		Message string           `json:"message"`
-		Result  []map[string]any `json:"result"`
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Result  json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, errors.New("云端响应解析失败")
+		return nil, fmt.Errorf("云端响应解析失败：%s", clipForLog(string(raw), 200))
 	}
 	if resp.Code != 0 {
 		return nil, fmt.Errorf("云端返回 code=%d message=%s", resp.Code, resp.Message)
 	}
-	return resp.Result, nil
+	trimmed := strings.TrimSpace(string(resp.Result))
+	if trimmed == "" || trimmed == "null" || trimmed == `""` {
+		return nil, nil
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(resp.Result, &list); err == nil {
+		return list, nil
+	}
+	var single map[string]any
+	if err := json.Unmarshal(resp.Result, &single); err == nil {
+		return []map[string]any{single}, nil
+	}
+	return nil, nil
 }
 
 
@@ -825,13 +855,16 @@ func cloudExecuteIRPower(ctx *plugin.Context, d miioDevice, on bool) error {
 		return fmt.Errorf("型号 %s 的规格里找不到 turn-on/turn-off 动作（无法经云端控制）", d.Model)
 	}
 	/*
-	 * 无入参的动作**不要带 `in` 字段**（2026-11-17 实测）。
+	 * 形状对齐参考实现 core/device.py:1289：
 	 *
-	 * 带 `"in": []` 时云端回 `code=-8 data type not valid` —— 小米把空数组当成
-	 * 类型不符，而不是"没有参数"。去掉后按"只有 did/siid/aiid"的形状发。
+	 *	pms = {'did': str(did), 'siid': siid, 'aiid': aiid, 'in': params or []}
+	 *	result = await cloud.async_do_action(pms)   # → {'params': pms}（**对象**）
+	 *
+	 * 即：`in` 要带（空数组），而 `params` 本身必须是**对象**而不是数组。
+	 * 之前两种错法（数组 + 有/无 in）都会得到 `code=-8 data type not valid`。
 	 */
 	rows, err := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "action",
-		[]map[string]any{{"did": d.ExternalID, "siid": siid, "aiid": aiid}})
+		map[string]any{"did": d.ExternalID, "siid": siid, "aiid": aiid, "in": []any{}})
 	if err != nil {
 		return err
 	}
@@ -841,4 +874,12 @@ func cloudExecuteIRPower(ctx *plugin.Context, d miioDevice, on bool) error {
 		}
 	}
 	return nil
+}
+
+// clipForLog 截断一段文本用于日志（避免把整包响应灌进日志）。
+func clipForLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
