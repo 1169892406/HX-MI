@@ -110,8 +110,50 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 			 * 平台侧该命令会以 acked=false 呈现 —— 这是诚实的。
 			 */
 			return nil
+		case "set_temperature":
+			/*
+			 * 平台 climate 的滑块发 `set_temperature` + `target_temp_c`
+			 * （见前端 capabilityControls.ts:16-30）。红外空调把这个值写到
+			 * `ir-temperature` 属性即可 —— 规格里它的范围就是 16~30、步长 1，
+			 * 所以先按规格夹紧，避免发出设备不接受的值。
+			 */
+			raw, ok := cmd.Params["target_temp_c"]
+			if !ok {
+				raw = cmd.Params["temperature"]
+			}
+			temp, tok := cloudNumber(raw)
+			if !tok {
+				return fmt.Errorf("温度参数不可用（收到 %v）", raw)
+			}
+			if temp < 16 {
+				temp = 16
+			}
+			if temp > 30 {
+				temp = 30
+			}
+			if err := cloudIRSetProp(ctx, *d, ":ir-temperature:", temp); err != nil {
+				return err
+			}
+			return nil
+		case "set_mode":
+			raw, _ := cmd.Params["mode"].(string)
+			mode, ok := irModeValue(raw)
+			if !ok {
+				return fmt.Errorf("不支持的模式 %q（可用 auto/cool/dry/heat/fan_only）", raw)
+			}
+			if err := cloudIRSetProp(ctx, *d, ":ir-mode:", mode); err != nil {
+				return err
+			}
+			return nil
+		case "set_fan_mode", "set_swing_mode":
+			/*
+			 * 风速/导风：规格里只有 `fan-speed-up` / `fan-speed-down` **相对动作**，
+			 * 没有"设到某一档"的属性 —— 用相对动作去凑绝对值会连发好几条红外指令，
+			 * 而且中间状态不可知。宁可明确说不支持，也不做这种"看起来能调"的实现。
+			 */
+			return fmt.Errorf("红外遥控暂不支持 %s（规格只有 fan-speed-up/down 相对动作）", cmd.Action)
 		default:
-			return fmt.Errorf("红外遥控暂只支持开关（收到 %q；风速/温度按同一通路待扩）", cmd.Action)
+			return fmt.Errorf("红外遥控暂只支持开关/温度/模式（收到 %q）", cmd.Action)
 		}
 	}
 	cmd, err = resolveCommandBinding(ctx, *d, cmd)
@@ -838,6 +880,71 @@ func cloudIRPowerAction(ctx *plugin.Context, model string, on bool) (int, int, b
 		}
 	}
 	return 0, 0, false
+}
+
+// cloudIRProp 在该型号规格里按属性名后缀找 (siid, piid)。
+//
+// 红外空调的 `ir-mode`(uint8) / `ir-temperature`(float) 都在 service 2，
+// 但不同型号服务编号可能不同，所以按 urn 里的名字找（`:ir-temperature:`）。
+func cloudIRProp(ctx *plugin.Context, model, nameSuffix string) (int, int, bool) {
+	typ, ok := lookupModelType(model)
+	if !ok {
+		return 0, 0, false
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, svc := range sp.Services {
+		for _, pr := range svc.Properties {
+			if strings.Contains(strings.ToLower(pr.Type), nameSuffix) {
+				return svc.IID, pr.IID, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// cloudIRSetProp 经云端写一个红外属性（温度/模式）。
+func cloudIRSetProp(ctx *plugin.Context, d miioDevice, nameSuffix string, value any) error {
+	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
+	if err != nil {
+		return fmt.Errorf("无云会话（需先登录）：%w", err)
+	}
+	siid, piid, ok := cloudIRProp(ctx, d.Model, nameSuffix)
+	if !ok {
+		return fmt.Errorf("型号 %s 的规格里没有 %s 属性", d.Model, nameSuffix)
+	}
+	rows, err := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/set",
+		[]map[string]any{{"did": d.ExternalID, "siid": siid, "piid": piid, "value": value}})
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if code, ok := r["code"].(float64); ok && int(code) != 0 {
+			return fmt.Errorf("设备拒绝写入（code=%d siid=%d piid=%d）", int(code), siid, piid)
+		}
+	}
+	return nil
+}
+
+// irModeValue 把平台的模式名翻成该型号的枚举值（0=Auto 1=Cool 2=Dry 3=Heat 4=Fan）。
+//
+// 枚举来自规格的 value-list（miir.aircondition.ir02 实测），不是猜的。
+func irModeValue(mode string) (float64, bool) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "auto":
+		return 0, true
+	case "cool":
+		return 1, true
+	case "dry":
+		return 2, true
+	case "heat":
+		return 3, true
+	case "fan_only", "fan":
+		return 4, true
+	}
+	return 0, false
 }
 
 // cloudExecuteIRPower 经云端发一次红外开关动作。
