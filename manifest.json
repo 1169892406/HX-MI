@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.67",
+  "version": "2.0.0-alpha.69",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -266,10 +266,10 @@
   },
   "signature": {
     "algorithm": "ed25519",
-    "key_id": "hx-mi-community",
+    "key_id": "homex-official",
     "value": ""
   },
-  "changelog": "2.0.0-alpha.67：根修**「云端有 12 台设备，但平台一台都没有、房间待绑定也是 0」**。真因：device.announce 要求**至少一个 capability**，而 capability 来自 MIoT 目录的 Binding 投影 —— 目录未构建/型号未收录时投影失败，调用处就当空 caps 继续，于是 12 台全部被平台拒（summary 里 announced=0 failed=12，而错误只计数、连日志都没记，界面上完全看不出来）。现在三级保底：①目录投影 ②已登记设备里学到的 ③型号前缀推断；全都没有时给 sensor（读状态永远成立）。宁可少报一个能力，也不要整台设备进不来。另：announce 失败现在会记下**原因**（原来只 failed++）。",
+  "changelog": "2.0.0-alpha.69 修「定时任务失败被当成成功」。平台 runSchedule 只按 error 记 last_error，而 sync_now 此前把失败塞进返回体 {started:false,reason} 并返回 nil error ⇒ 定时任务 run_count 一路涨、last_error 恒空，插件注册表却没有设备，整条链路没有任何一处能看出同步失败。现在失败先 LogWarn 再返回 error，plugin_schedules.last_error 直接写明原因。\n\n2.0.0-alpha.68 修「定时自动同步形同虚设，设备数据从不推给平台」（用户原话：「插件定时通过接口推送同步设备数据到平台」）。\n\n根因：账号同步此前挂在宿主 background tick 上。tick 回调发生在宿主持有该 wasm 实例锁的时候，所以 tick 里**任何 host_call 都会自死锁**（alpha.6x 里 03:59 那次实测：sync-state.json 从此再没生成）。于是 tick 只能置位 `cloudSyncPending`，等\"下一次工具调用\"消费——而**平台自己从不调插件工具**。实测：account-sync 投递 694 次、真同步 0 次，日志清一色 `marked pending (consumed on next tool call)`；注册表因此长期为空，平台侧控制命令全被判「插件设备不存在」。\n\n修法：用平台本来就提供的正路 `schedule.create`（manifest 早已声明该权限，但从未使用）——插件在 Configure 里注册一条**平台定时任务** `hxmi-auto-sync`，目标工具 `sync_now`。平台到点把它当**一次普通工具调用**执行（pluginsvc.runSchedule → CallTool），此时没有 tick 的那把实例锁，可以正常发 host_call，真正跑完 syncCloudDevices → ctx.DeviceAnnounce(...)，设备数据即被推送到平台。\n\n三点收益：① 持久化（plugin_schedules 是库表，服务重启后照样到期执行）；② 幂等（平台按 (installation_id,name) upsert，同名只更新 spec，不堆重复任务）；③ 可审计（last_run_at / run_count / last_error 都在表里）。\n另：用户在 account_settings 里改间隔时同步更新该定时任务，避免\"界面显示一小时、实际仍按旧频率推送\"。\ncron 由秒数换算（平台最小粒度是分钟，向上取整，宁可少跑不超额同步）。\n原 background tick 保留（无害），但不再承担推送职责。\n\n2.0.0-alpha.67：根修**「云端有 12 台设备，但平台一台都没有、房间待绑定也是 0」**。真因：device.announce 要求**至少一个 capability**，而 capability 来自 MIoT 目录的 Binding 投影 —— 目录未构建/型号未收录时投影失败，调用处就当空 caps 继续，于是 12 台全部被平台拒（summary 里 announced=0 failed=12，而错误只计数、连日志都没记，界面上完全看不出来）。现在三级保底：①目录投影 ②已登记设备里学到的 ③型号前缀推断；全都没有时给 sensor（读状态永远成立）。宁可少报一个能力，也不要整台设备进不来。另：announce 失败现在会记下**原因**（原来只 failed++）。",
   "tools": [
     "regions",
     "login",

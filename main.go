@@ -87,6 +87,44 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 		if err := ctx.BackgroundRegister(plugin.BackgroundRegisterRequest{Name: "account-sync", IntervalMS: next.SyncIntervalSec * 1000, Immediate: true}); err != nil {
 			return err
 		}
+		/*
+		 * ★★★ 2026-11-16（用户「插件定时通过接口推送同步设备数据到平台」）：
+		 *
+		 * **这一条才是真正干活的**，上面那个 BackgroundRegister 只是"敲门"。
+		 *
+		 * ## 为什么必须另起一条平台定时任务
+		 *
+		 * 上面的 `account-sync` 走的是宿主 background tick。tick 回调发生在
+		 * 宿主持有该 wasm 实例锁的时候（CallOp 对单实例串行），所以 tick 里
+		 * **任何 host_call 都会自死锁**（代码里 319 行那段注释记了 03:59 那次
+		 * 实测：sync-state.json 从此再没生成过）。于是 tick 只能
+		 * `cloudSyncPending.Store(true)` 置位，等"下一次工具调用"来消费。
+		 *
+		 * 问题就在这儿：**平台自己从不调插件工具**。实测统计——
+		 * account-sync 投递 694 次、真正同步 0 次，日志清一色
+		 * `marked pending (consumed on next tool call)`；
+		 * 而注册表因此长期为空 ⇒ 平台控制命令全被判「插件设备不存在」。
+		 *
+		 * `ScheduleCreate` 是平台本来就提供的正路（本插件 manifest 已声明
+		 * `schedule.create` 权限，但此前**从未使用**）：平台把到点的任务
+		 * 当作**一次普通工具调用**执行（`pluginsvc.runSchedule` → `CallTool`），
+		 * 此时没有 tick 的那把实例锁 ⇒ 可以正常发 host_call ⇒ 真正跑完
+		 * `sync_now` → `syncCloudDevices` → `ctx.DeviceAnnounce(...)`，
+		 * 设备数据就被推到平台了。
+		 *
+		 * 三个附带好处：
+		 *  · **持久化**：`plugin_schedules` 是库表，服务重启后照样到期执行
+		 *    （内存 tick 则要等插件重新注册 + 有人来消费）；
+		 *  · **幂等**：平台按 `(installation_id, name)` upsert，同名重复注册
+		 *    只是更新 spec，不会堆出一串重复任务（见 repo.scheduleInsert）；
+		 *  · **可审计**：`last_run_at` / `run_count` / `last_error` 都在表里，
+		 *    "到底有没有同步"不再靠猜。
+		 *
+		 * 失败只 Warn：定时任务是增强能力，不能因此让插件启用失败。
+		 */
+		if err := registerAutoSyncSchedule(ctx, next.SyncIntervalSec); err != nil {
+			ctx.LogWarn("自动同步定时任务注册失败（插件仍可用，手动同步不受影响）：%v", err)
+		}
 	}
 	// MIoT 目录每月刷新一次；由宿主统一调度（jitter/失败退避/disable 清理在
 	// 宿主 scheduler），插件自己不起 ticker，也不在 Boot 时阻塞网络。
@@ -204,8 +242,24 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		}
 		return json.Marshal(map[string]any{"state": "deleted", "account_id": in.AccountID})
 	case "sync_now":
+		/*
+		 * ★★★ 2026-11-16（定时推送排查）：**失败必须作为错误返回**，不能只放进
+		 * 返回体里的 `started:false`。
+		 *
+		 * 为什么：这个工具现在是平台定时任务（hxmi-auto-sync）的目标。平台的
+		 * `pluginsvc.runSchedule` 只按 **error** 记录 `last_error`——
+		 * 工具返回 `{"started":false,"reason":...}` 而 error 为 nil 时，
+		 * 平台会记成"执行成功"。实测就是这么被瞒过去的：
+		 * 定时任务 run_count 一路增长、last_error 为空，
+		 * 而插件注册表始终没有设备（控制命令全走"注册表为空"的兜底），
+		 * 没有任何一处能看出同步其实失败了。
+		 *
+		 * 现在：先 LogWarn 留一条人话，再把真错误返回给平台 ——
+		 * `plugin_schedules.last_error` 会直接写明原因，排查不用再猜。
+		 */
 		if _, err := syncCloudDevices(ctx); err != nil {
-			return json.Marshal(map[string]any{"started": false, "reason": err.Error()})
+			ctx.LogWarn("hx-mi sync_now 失败：%v", err)
+			return nil, fmt.Errorf("设备同步失败：%w", err)
 		}
 		return json.Marshal(map[string]any{"started": true})
 	case "login":
@@ -355,6 +409,71 @@ func event(ctx *plugin.Context, subject string, payload json.RawMessage) error {
 		ctx.Log(0, "hx-mi resource event received")
 	}
 	return nil
+}
+
+
+// autoSyncScheduleName 是平台侧定时任务的名字。
+//
+// 固定名字是有意的：平台 `scheduleInsert` 按 `(installation_id, name)` upsert，
+// 同一个名字重复注册只会更新 spec —— 用户改同步间隔时不需要先删旧任务，
+// 也不会在 plugin_schedules 里堆出一串历史任务。
+const autoSyncScheduleName = "hxmi-auto-sync"
+
+// registerAutoSyncSchedule 让**平台**按用户设定的间隔调用本插件的 `sync_now`。
+//
+// # 为什么不是插件自己起 ticker
+//
+// 插件合同禁止自建长期循环（§12），而且 wasm 单线程里 tick 内发 host_call
+// 会自死锁（详见 configure 里那段注释）。
+//
+// # 为什么目标是 sync_now 而不是 account_sync
+//
+// 两者都真跑 `syncCloudDevices`，但 `sync_now` 是**家庭级**工具：
+// 平台的 `runSchedule` 只对"账号级工具"要求 account 上下文
+// （见 pluginsvc/events.go：非 account scope 不设置 cc.AccountID）。
+// 用账号级工具做定时目标会因"创建时未盖章"直接被跳过。
+func registerAutoSyncSchedule(ctx *plugin.Context, intervalSec int) error {
+	cron, ok := cronForSeconds(intervalSec)
+	if !ok {
+		return fmt.Errorf("同步间隔 %ds 无法表达为平台 cron（需 >= 60s）", intervalSec)
+	}
+	_, err := ctx.ScheduleCreate(plugin.ScheduleCreateRequest{
+		Name: autoSyncScheduleName,
+		Cron: cron,
+		Tool: "sync_now",
+	})
+	return err
+}
+
+// cronForSeconds 把"每 N 秒"翻译成平台能解析的 cron 表达式。
+//
+// 平台 cron 最小粒度是**分钟**，所以按区间分档，并且**向上取整**：
+// 宁可少跑一次，也不要让"设 90 秒"变成每分钟跑一次（那是超额同步，
+// 对小米云是压力，对用户是没必要）。
+//
+//	< 1 分钟   → 每分钟（下限，平台不支持秒级）
+//	1..59 分钟 → 每 N 分钟
+//	1..23 小时 → 每小时第 0 分、每 H 小时
+//	>= 24 小时 → 每天 00:00
+func cronForSeconds(intervalSec int) (string, bool) {
+	if intervalSec < 60 {
+		return "", false
+	}
+	mins := (intervalSec + 59) / 60 // 向上取整
+	if mins <= 1 {
+		return "* * * * *", true
+	}
+	if mins < 60 {
+		return fmt.Sprintf("*/%d * * * *", mins), true
+	}
+	hours := (mins + 59) / 60
+	if hours <= 1 {
+		return "0 * * * *", true
+	}
+	if hours < 24 {
+		return fmt.Sprintf("0 */%d * * *", hours), true
+	}
+	return "0 0 * * *", true
 }
 
 func health(*plugin.Context) (plugin.HealthStatus, error) {

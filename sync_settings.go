@@ -90,6 +90,16 @@ func applySyncSettingsTool(ctx *plugin.Context, args json.RawMessage) (json.RawM
 		}); err != nil {
 			return nil, err
 		}
+		/*
+		 * ★ 2026-11-16：间隔改了，**平台那条真正干活的定时任务也必须跟着改**。
+		 * 只改 background tick 的话，用户把 30 分钟改成一小时，界面上会显示
+		 * 一小时，而实际推送仍是旧频率 —— 又一处"显示与行为不一致"。
+		 * 同名 upsert，不会产生重复任务（见 registerAutoSyncSchedule）。
+		 * 失败只 Warn：不能用"定时任务注册不上"把用户保存设置的动作也挡掉。
+		 */
+		if err := registerAutoSyncSchedule(ctx, s.IntervalSeconds); err != nil {
+			ctx.LogWarn("自动同步定时任务更新失败（手动同步不受影响）：%v", err)
+		}
 	}
 	return json.Marshal(map[string]any{
 		"interval_seconds":   s.IntervalSeconds,
