@@ -197,6 +197,21 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		if !stringInSlice(caps, "sensor") && modelHasTemperature(ctx, c.Model) {
 			caps = append(caps, "sensor")
 		}
+		/*
+		 * 红外设备（电视/空调遥控）必须报出**可控**能力（2026-11-17）。
+		 *
+		 * 这类设备没有局域网地址，兜底投影只按型号前缀猜（`ir`/`television`
+		 * 都不在前缀表里 ⇒ 退到 `sensor`），于是平台把它当只读传感器 ——
+		 * 遥控器明明能开关电视，界面上却一个按钮都没有。
+		 *
+		 * 判据用规格里**是否真的有 turn-on 动作**（不是型号表）：
+		 * 电视 `miir-tv-ir01` 的 service 2 就有 turn-on/turn-off/volume/mute；
+		 * 空调 `miir-aircondition-ir02` 同样有 turn-on/turn-off。
+		 * 平板能力名用 `switch`（平台 UI 据此渲染开关，语义也准确：开/关）。
+		 */
+		if !stringInSlice(caps, "switch") && modelHasTurnOnAction(ctx, c.Model) {
+			caps = append(caps, "switch")
+		}
 		host := c.LocalIP
 		name := c.Name
 		if name == "" {
@@ -375,6 +390,34 @@ func stringInSlice(list []string, target string) bool {
 	for _, v := range list {
 		if v == target {
 			return true
+		}
+	}
+	return false
+}
+
+
+// modelHasTurnOnAction 判断型号的 MIoT 规格里是否有 turn-on 动作（红外遥控的判据）。
+//
+// 与 modelHasTemperature 同一思路：按**规格事实**判断，不维护型号表 ——
+// 红外型号（miir-tv-ir01 / miir-aircondition-ir02 / xiaomi.ir.*）各不相同，
+// 写表必漏，而规格里动作名是稳定的 urn（`:turn-on:`）。
+func modelHasTurnOnAction(ctx *plugin.Context, model string) bool {
+	if model == "" {
+		return false
+	}
+	typ, ok := lookupModelType(model)
+	if !ok {
+		return false
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return false
+	}
+	for _, svc := range sp.Services {
+		for _, a := range svc.Actions {
+			if strings.Contains(strings.ToLower(a.Type), ":turn-on:") {
+				return true
+			}
 		}
 	}
 	return false
