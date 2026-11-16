@@ -183,7 +183,15 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 				state["switch"] = map[string]any{"power": on}
 			}
 			if t, ok := legacyNumber(got["temperature"]); ok && t > -40 && t < 80 {
-				state["sensor"] = map[string]any{"temperature": t}
+				/*
+				 * ⚠ 发 `value` + `unit`，**不是** `temperature`（2026-11-16 核实）。
+				 *
+				 * 前端 `sensorReadouts()` 读的就是这两个属性：
+				 *   readProperty(rows, cap, 'value') / readProperty(rows, cap, 'unit')
+				 * 旧代码按 `temperature` 这类顶层键读，后端也不产出，
+				 * 于是传感器卡永远空着 —— 同一个坑不能在新代码里再踩一次。
+				 */
+				state["sensor"] = map[string]any{"value": t, "unit": "℃"}
 			}
 		} else {
 			ctx.LogWarn("hx-mi 老协议状态回读失败（设备 %s）：%v", d.ExternalID, gerr)
@@ -607,4 +615,123 @@ func encodeBase64(b []byte) string {
 		}
 	}
 	return out.String()
+}
+
+// cloudReadSensorState 经**云端**读一台 BLE 设备（温湿度计这类没有 LAN IP 的设备）。
+//
+// # 为什么必须走云端
+//
+// BLE 传感器没有 IP（`devices.json` 里 host 为空），本地 miio 的 hello/加密通道
+// 对它无从下手；读它只有两条路：小米多模网关转发，或云端 `miotspec/prop/get`。
+// 本插件已经有可用的云会话（同步设备清单用的就是它），所以走云端最省。
+//
+// # 只读这三项
+//
+// `miaomiaoce.sensor_ht.t2` 的规格（本地 spec-cache 核对过）：
+//   siid=2 piid=1 → temperature
+//   siid=2 piid=2 → relative-humidity
+//   siid=3 piid=1 → battery-level
+//
+// # 上报形状
+//
+// 前端只认 `sensor.value` + `sensor.unit` 两个属性（见 sensorReadouts），
+// 所以主读数发 value/unit；湿度额外带一个 `humidity` 属性
+// （当前卡片不显示，但数据在，将来做湿度卡不用重跑链路）。
+func cloudReadSensorState(ctx *plugin.Context, sessionID, ssecurity, deviceID, did string) (map[string]any, error) {
+	type propRef struct {
+		SIID int
+		PIID int
+	}
+	refs := []propRef{{2, 1}, {2, 2}, {3, 1}}
+	params := make([]map[string]any, 0, len(refs))
+	for _, r := range refs {
+		params = append(params, map[string]any{"did": did, "siid": r.SIID, "piid": r.PIID})
+	}
+	body, err := json.Marshal(map[string]any{"datasource": 2, "params": params})
+	if err != nil {
+		return nil, err
+	}
+	raw, err := apiPostRC4GuestDevice(ctx, sessionID, ssecurity, deviceID,
+		"https://api.io.mi.com/app/miotspec/prop/get", string(body))
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Result []struct {
+			SIID  int   `json:"siid"`
+			PIID  int   `json:"piid"`
+			Value any   `json:"value"`
+			Code  int   `json:"code"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, errors.New("云端属性响应解析失败")
+	}
+	out := map[string]any{}
+	for _, r := range resp.Result {
+		if r.Code != 0 {
+			continue
+		}
+		num, ok := cloudNumber(r.Value)
+		if !ok {
+			continue
+		}
+		switch {
+		case r.SIID == 2 && r.PIID == 1:
+			out["sensor"] = map[string]any{"value": num, "unit": "℃"}
+		case r.SIID == 2 && r.PIID == 2:
+			if s, ok := out["sensor"].(map[string]any); ok {
+				s["humidity"] = num
+			} else {
+				out["sensor"] = map[string]any{"humidity": num}
+			}
+		case r.SIID == 3 && r.PIID == 1:
+			if s, ok := out["sensor"].(map[string]any); ok {
+				s["battery"] = num
+			}
+		}
+	}
+	if len(out) == 0 {
+		/*
+		 * 设备离线要**如实说**，别说成"没有可用读数"（2026-11-16 实测原文）：
+		 *
+		 *	{"code":0,"message":"ok","result":[
+		 *	  {"did":"blt.3.152hiadjgec01","siid":2,"piid":1,"code":-704010000},
+		 *	  ... 全部 -704010000 ]}
+		 *
+		 * `-704010000` 是小米云的"设备离线/不可达"（BLE 传感器在休眠很常见）。
+		 * 把它当成"读取失败"会让人去查插件；如实写"设备离线"才会让人去查设备。
+		 */
+		offline := len(resp.Result) > 0
+		for _, r := range resp.Result {
+			if r.Code != -704010000 {
+				offline = false
+				break
+			}
+		}
+		if offline {
+			return nil, errors.New("设备离线（云端 code=-704010000：BLE 传感器休眠或不在网关范围内）")
+		}
+		// 其它情况把原始响应记下来：不打出原文就只能猜（本仓反复踩过的坑）。
+		preview := string(raw)
+		if len(preview) > 400 {
+			preview = preview[:400] + "…"
+		}
+		return nil, fmt.Errorf("云端没有返回可用读数（原始响应：%s）", preview)
+	}
+	return out, nil
+}
+
+// cloudNumber 把云端返回的数值（数字或字符串）统一成 float64。
+func cloudNumber(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }

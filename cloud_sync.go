@@ -253,6 +253,28 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		}
 		summary["announced"]++
 
+		/*
+		 * BLE 设备的状态（2026-11-16 用户「温湿度计没有状态」）。
+		 *
+		 * 这类设备 `host` 为空 —— 没有 IP，本地 miio 完全无从下手，只能走云端。
+		 * 两条约束：
+		 *  1. **只读传感器类**（型号里含 "sensor"）：同步是 30s 预算内的任务，
+		 *     对十几台 BLE 设备逐个发云端请求会把预算打满，反而拖垮同步本身；
+		 *  2. 失败只 Warn 不中断：一台读不到不该让整轮同步失败。
+		 */
+		if strings.TrimSpace(c.LocalIP) == "" && strings.Contains(strings.ToLower(c.Model), "sensor") {
+			if st, serr := cloudReadSensorState(ctx, sessionID, ssecurity, deviceID, external); serr != nil {
+				ctx.LogWarn("hx-mi 云端读取传感器状态失败（device=%s model=%s）：%v", external, c.Model, serr)
+			} else if perr := ctx.DeviceStatePublish(plugin.DeviceStateRequest{
+				ExternalID: external, State: st,
+				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			}); perr != nil {
+				ctx.LogWarn("hx-mi 传感器状态上报失败（device=%s）：%v", external, perr)
+			} else {
+				summary["states"]++
+			}
+		}
+
 		if c.Token != "" {
 			tok, derr := hex.DecodeString(c.Token)
 			if derr == nil && len(tok) == 16 {
