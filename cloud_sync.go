@@ -277,6 +277,63 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		 *     对十几台 BLE 设备逐个发云端请求会把预算打满，反而拖垮同步本身；
 		 *  2. 失败只 Warn 不中断：一台读不到不该让整轮同步失败。
 		 */
+		/*
+		 * LAN 传感器周期读取（2026-11-17）。
+		 *
+		 * 之前状态上报**只在下发命令时**发生 —— 而传感器没有命令，于是
+		 * `小米天然气卫士` 这类设备永远没有数据（用户报"传感器看不见"）。
+		 * 同步每轮顺带读一次，是这类设备唯一可行的取数方式。
+		 */
+		/*
+		 * 每轮**最多轮询一台**传感器（2026-11-17）。
+		 *
+		 * 实测：LAN 读取失败时 miio 会重试 3 次 × 3s = 9s，两三台就把同步的
+		 * 30s 预算吃光（`sync_now` 直接超时）。传感器数据不需要"每轮全量"，
+		 * 轮着来即可：一台/轮，5 分钟一轮，几分钟内全部覆盖一遍。
+		 */
+		pollSensor := false
+		if strings.TrimSpace(c.LocalIP) != "" && isSensorLikeModel(c.Model) && summary["states"] < 1 {
+			pollSensor = true
+		}
+		if pollSensor {
+			/*
+			 * 先本地、失败再云端（2026-11-17）。
+			 *
+			 * 实测 `lumi.sensor_gas.mcn02` 的 `localip` 指向的地址直连
+			 * `udp 等待响应超时` —— 它是**经网关的 Zigbee 子设备**，本地直连不通。
+			 * Wi-Fi 传感器则本地就够（快、不依赖外网）。
+			 * 所以两条都试：本地优先，失败回落云端（云端会经网关转发）。
+			 */
+			var st map[string]any
+			var serr error
+			if strings.HasPrefix(strings.ToLower(c.Model), "lumi.") {
+				// lumi.* 是**网关的 Zigbee 子设备**：localip 直连必然超时，
+				// 直接走云端（云端经网关转发），省掉 9s 的无谓重试。
+				st, serr = readSensorStateViaCloud(ctx, ds[index[external]], external,
+					sessionID, ssecurity, deviceID)
+			} else {
+				st, serr = readLANSensorState(ctx, ds[index[external]], external)
+				if serr != nil {
+					if cst, cerr := readSensorStateViaCloud(ctx, ds[index[external]], external,
+						sessionID, ssecurity, deviceID); cerr == nil {
+						st, serr = cst, nil
+					}
+				}
+			}
+			if serr != nil {
+				ctx.LogWarn("hx-mi 传感器读取失败（device=%s model=%s）：%v", external, c.Model, serr)
+			}
+			if len(st) > 0 {
+				if perr := ctx.DeviceStatePublish(plugin.DeviceStateRequest{
+					ExternalID: external, State: st,
+					ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				}); perr != nil {
+					ctx.LogWarn("hx-mi LAN 传感器状态上报失败（device=%s）：%v", external, perr)
+				} else {
+					summary["states"]++
+				}
+			}
+		}
 		if strings.TrimSpace(c.LocalIP) == "" && strings.Contains(strings.ToLower(c.Model), "sensor") {
 			if st, serr := cloudReadSensorState(ctx, sessionID, ssecurity, deviceID, external); serr != nil {
 				ctx.LogWarn("hx-mi 云端读取传感器状态失败（device=%s model=%s）：%v", external, c.Model, serr)
@@ -503,4 +560,178 @@ func modelAllowed(model string) bool {
 func sha256Hex(b []byte) string {
 	s := sha256.Sum256(b)
 	return fmt.Sprintf("%x", s[:])
+}
+
+// isSensorLikeModel 判断型号是否属于"只读传感器"（需要周期读取而不是等下命令）。
+//
+// 判据用型号里的稳定词根：sensor / magnet / motion / leak / smoke / gas ——
+// 这些是小米命名的事实（`lumi.sensor_gas.mcn02`、`miaomiaoce.sensor_ht.t2`）。
+func isSensorLikeModel(model string) bool {
+	m := strings.ToLower(model)
+	for _, k := range []string{"sensor", "magnet", "motion", "leak", "smoke", "gas"} {
+		if strings.Contains(m, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// readLANSensorState 经**局域网**读一台传感器的可读属性，组装成能力结构状态。
+//
+// # 形状
+//
+// 规格里除 service 1（device-information：厂商/型号/固件）以外、带 `read` 权限的
+// 属性都读；按格式分派：
+//   · float（如 gas-concentration）   ⇒ `sensor {value, unit?}`
+//   · 整型/布尔（如 status 报警等级）  ⇒ `binary_sensor {value}`
+//
+// 不在这里编语义（0=正常/1=报警）：数值本身就是设备真值，原样呈现比不呈现诚实；
+// 语义映射等确认型号文档后再加。
+func readLANSensorState(ctx *plugin.Context, d miioDevice, external string) (map[string]any, error) {
+	token, _, err := ctx.VaultBlobOpenDevice("miio_token", external)
+	if err != nil || len(token) != 16 {
+		return nil, errors.New("设备 token Vault 不可用")
+	}
+	typ, ok := lookupModelType(d.Model)
+	if !ok {
+		return nil, fmt.Errorf("型号 %s 不在目录中（无规格可取属性）", d.Model)
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return nil, fmt.Errorf("读取规格失败：%w", err)
+	}
+	type ref struct{ kind, unit string }
+	refs := map[string]ref{}
+	var params []map[string]any
+	for _, svc := range sp.Services {
+		if svc.IID == 1 {
+			continue // device-information
+		}
+		for _, pr := range svc.Properties {
+			if !hasAccess(pr.Access, "read") {
+				continue
+			}
+			params = append(params, map[string]any{"did": d.ExternalID, "siid": svc.IID, "piid": pr.IID})
+			kind := "binary_sensor"
+			if pr.Format == "float" {
+				kind = "sensor"
+			}
+			refs[fmt.Sprintf("%d.%d", svc.IID, pr.IID)] = ref{kind: kind, unit: pr.Unit}
+		}
+	}
+	if len(params) == 0 {
+		return nil, errors.New("规格里没有可读属性")
+	}
+	rows, err := miioBatchProperties(ctx, d, token, "get_properties", params)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	for _, row := range rows {
+		if code, ok := row["code"].(float64); ok && int(code) != 0 {
+			continue
+		}
+		siid, _ := row["siid"].(float64)
+		piid, _ := row["piid"].(float64)
+		r, ok := refs[fmt.Sprintf("%d.%d", int(siid), int(piid))]
+		if !ok {
+			continue
+		}
+		switch v := row["value"].(type) {
+		case float64:
+			if r.kind == "sensor" {
+				val := map[string]any{"value": v}
+				if r.unit != "" {
+					val["unit"] = r.unit
+				}
+				out["sensor"] = val
+			} else {
+				out["binary_sensor"] = map[string]any{"value": v}
+			}
+		case bool:
+			out["binary_sensor"] = map[string]any{"value": v}
+		}
+	}
+	return out, nil
+}
+
+
+// readSensorStateViaCloud 经云端读传感器的可读属性（Zigbee 子设备走网关时用）。
+//
+// 与 readLANSensorState 的映射规则完全一致（float → sensor{value,unit}、
+// 整型/布尔 → binary_sensor{value}），只是取数通道换成云端
+// `miotspec/prop/get`（params 是**数组**）。
+func readSensorStateViaCloud(ctx *plugin.Context, d miioDevice, external,
+	sessionID, ssecurity, deviceID string) (map[string]any, error) {
+	typ, ok := lookupModelType(d.Model)
+	if !ok {
+		return nil, fmt.Errorf("型号 %s 不在目录中", d.Model)
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return nil, fmt.Errorf("读取规格失败：%w", err)
+	}
+	type ref struct{ kind, unit string }
+	refs := map[string]ref{}
+	var params []map[string]any
+	for _, svc := range sp.Services {
+		if svc.IID == 1 {
+			continue
+		}
+		for _, pr := range svc.Properties {
+			if !hasAccess(pr.Access, "read") {
+				continue
+			}
+			params = append(params, map[string]any{"did": d.ExternalID, "siid": svc.IID, "piid": pr.IID})
+			kind := "binary_sensor"
+			if pr.Format == "float" {
+				kind = "sensor"
+			}
+			refs[fmt.Sprintf("%d.%d", svc.IID, pr.IID)] = ref{kind: kind, unit: pr.Unit}
+		}
+	}
+	if len(params) == 0 {
+		return nil, errors.New("规格里没有可读属性")
+	}
+	rows, err := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/get", params)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	for _, row := range rows {
+		if code, ok := row["code"].(float64); ok && int(code) != 0 {
+			continue
+		}
+		siid, _ := row["siid"].(float64)
+		piid, _ := row["piid"].(float64)
+		r, ok := refs[fmt.Sprintf("%d.%d", int(siid), int(piid))]
+		if !ok {
+			continue
+		}
+		switch v := row["value"].(type) {
+		case float64:
+			if r.kind == "sensor" {
+				val := map[string]any{"value": v}
+				if r.unit != "" {
+					val["unit"] = r.unit
+				}
+				out["sensor"] = val
+			} else {
+				out["binary_sensor"] = map[string]any{"value": v}
+			}
+		case bool:
+			out["binary_sensor"] = map[string]any{"value": v}
+		}
+	}
+	return out, nil
+}
+
+// hasAccess 判断规格里的 access 列表是否包含某权限。
+func hasAccess(list []string, want string) bool {
+	for _, a := range list {
+		if strings.EqualFold(a, want) {
+			return true
+		}
+	}
+	return false
 }
