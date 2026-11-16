@@ -647,7 +647,19 @@ func cloudReadSensorState(ctx *plugin.Context, sessionID, ssecurity, deviceID, d
 	for _, r := range refs {
 		params = append(params, map[string]any{"did": did, "siid": r.SIID, "piid": r.PIID})
 	}
-	body, err := json.Marshal(map[string]any{"datasource": 2, "params": params})
+	/*
+	 * ⚠ **不要带 `datasource`**（2026-11-17 按参考实现 hass-xiaomi-miot 核对）。
+	 *
+	 * 该项目的 `async_request_miot_spec` 只发 `{"params": [...]}`：
+	 *
+	 *	async def async_request_miot_spec(self, api, params=None, **kwargs):
+	 *	    resp = await self.async_request_api('miotspec/' + api, {'params': params or []}, ...)
+	 *
+	 * 而我之前自己加了 `"datasource": 2`，云端对 BLE 设备回 `code:-704010000`
+	 * （设备离线），看起来像"设备不在线"，实际是这个字段让请求走了另一条取数路径。
+	 * 按参考实现去掉，只发 params。
+	 */
+	body, err := json.Marshal(map[string]any{"params": params})
 	if err != nil {
 		return nil, err
 	}
