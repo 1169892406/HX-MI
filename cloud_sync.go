@@ -271,6 +271,9 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		if err := ctx.DeviceAnnounce(plugin.DeviceAnnounceRequest{
 			ExternalID: external, Name: name, Vendor: "xiaomi", Model: c.Model,
 			Capabilities: ds[index[external]].Capabilities, Available: &avail,
+			// 规格驱动的控件明细（2026-11-17）：平台据此渲染"麦克风静音/停止闹钟"
+			// 这类**命名**控件，而不是一个笼统的"开关/按下"。
+			Attributes: map[string]any{"controls": specControls(ctx, c.Model)},
 		}); err != nil {
 			/*
 			 * ⚠ 必须记下**原因**（2026-11-10 用户实测"设备没进待绑定列表"）。
@@ -605,6 +608,128 @@ func sha256Hex(b []byte) string {
 	return fmt.Sprintf("%x", s[:])
 }
 
+
+
+// specControls 把规格里的可写属性与动作导出成平台能渲染的控件描述。
+//
+// 契约（平台 adapter 的 capsToSpecs 读它）：
+//
+//	[{"capability":"switch","instance_id":"mute","name":"麦克风静音","format":"bool","write":true},
+//	 {"capability":"button","instance_id":"stop-alarm","name":"停止闹钟","action":"stop-alarm"},
+//	 {"capability":"number","instance_id":"volume","name":"音量","format":"uint8","min":0,"max":100}]
+//
+// name 用**规格的中文名**（multiLanguage 字典，如「播放电台」）；取不到就用人话化
+// 的英文名（`Play Radio`），绝不显示 `play_radio` 这种内部串。
+//
+// 只导 service≥2 的属性/动作：service 1 是厂商/型号/固件，不是控件。
+func specControls(ctx *plugin.Context, model string) []map[string]any {
+	typ, ok := lookupModelType(model)
+	if !ok {
+		return nil
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return nil
+	}
+	out := []map[string]any{}
+	for _, svc := range sp.Services {
+		if svc.IID == 1 {
+			continue
+		}
+		svcName := firstNonEmptyStr(svc.Name, humanizeURN(svc.Type))
+		// 实例名前缀：服务短名（speaker / microphone / play-control…），
+		// 避免不同服务下的同名属性/动作撞车。
+		svcIID := actionNameOf(svc.Type)
+		for _, pr := range svc.Properties {
+			if !hasAccess(pr.Access, "write") {
+				continue
+			}
+			var capName string
+			switch pr.Format {
+			case "bool":
+				capName = "switch"
+			case "uint8", "uint16", "uint32", "float":
+				capName = "number"
+			default:
+				continue
+			}
+			/*
+			 * instance_id 必须**全局唯一**（2026-11-17 实测配对失败）。
+			 *
+			 * 平台 `device_capabilities` 的唯一键是
+			 * (device_id, endpoint_id, type, instance_id)。而同一台音箱的规格里
+			 * **有两个 mute**：service 2「音箱静音」与 service 4「麦克风静音」——
+			 * 只按属性名取实例名会撞车，配对直接 500：
+			 * `UNIQUE constraint failed: device_capabilities…(2067)`。
+			 *
+			 * 所以用 `服务名_属性名`：speaker_mute / microphone_mute，既唯一又可读。
+			 */
+			propName := actionNameOf(pr.Type)
+			instName := svcIID + "_" + propName
+			c := map[string]any{
+				"capability":  capName,
+				"instance_id": instName,
+				"name":        firstNonEmptyStr(pr.Name, humanizeURN(pr.Type)),
+				"group":       svcName,
+				"format":      pr.Format,
+				"write":       true,
+			}
+			if len(pr.ValueRange) >= 2 {
+				c["min"] = pr.ValueRange[0]
+				c["max"] = pr.ValueRange[1]
+				if len(pr.ValueRange) >= 3 && pr.ValueRange[2] > 0 {
+					c["step"] = pr.ValueRange[2]
+				}
+			}
+			if pr.Unit != "" {
+				c["unit"] = pr.Unit
+			}
+			out = append(out, c)
+		}
+		for _, a := range svc.Actions {
+			act := actionNameOf(a.Type)
+			// 动作同理加服务前缀：多个服务都可能有同名动作。
+			out = append(out, map[string]any{
+				"capability":  "button",
+				"instance_id": svcIID + "_" + act,
+				"name":        firstNonEmptyStr(a.Name, humanizeURN(a.Type)),
+				"group":       svcName,
+				"action":      act,
+			})
+		}
+	}
+	return out
+}
+
+// actionNameOf 从 urn 里取最后一段名字：`urn:...:action:play-radio:…` → `play-radio`。
+func actionNameOf(urn string) string {
+	parts := strings.Split(urn, ":")
+	for i, p := range parts {
+		if (p == "action" || p == "property" || p == "service") && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+// humanizeURN 兜底显示名：urn 里那段 `play-radio` → `Play Radio`。
+func humanizeURN(urn string) string {
+	n := actionNameOf(urn)
+	if n == "" {
+		return ""
+	}
+	return strings.Title(strings.ReplaceAll(n, "-", " "))
+}
+
+// firstNonEmptyStr 取第一个非空串。
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // projectSpecControls 从规格里推导"可写属性 / 动作"对应的平台能力名。
 //

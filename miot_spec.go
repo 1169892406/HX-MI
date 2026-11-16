@@ -183,46 +183,79 @@ func readCachedSpec(ctx *plugin.Context, path, model string) (miotSpec, bool) {
 	if json.Unmarshal(c.Spec, &sp) != nil {
 		return miotSpec{}, false
 	}
+	/*
+	 * 缓存的 body 是**原始规格**（没有中文名）。翻译字典单独缓存，
+	 * 每次读出来补上（失败就维持英文名，不影响功能）。
+	 *
+	 * 为什么不在写缓存时把中文名编进 body：body 参与 sha256 校验，
+	 * 编进去会让"校验和对不上"变成常态；翻译是**渲染层**的事，独立存更干净。
+	 */
+	applyCachedTranslations(ctx, &sp, model)
 	return sp, true
 }
 
-
-// applySpecTranslations 用翻译字典给服务/属性/动作补中文名（失败不影响功能）。
+// applyCachedTranslations 给已解析的规格补中文名（字典单独缓存，TTL 更长）。
 //
-// 字典形状：{"data":{"zh":{"service:002":"音箱","service:002:action:003":"播放"}}}
-// 键的编号是**3 位补零**（参考实现 MiotSpecInstance 的 unique_name 也是这么拼的）。
-func applySpecTranslations(ctx *plugin.Context, sp *miotSpec, model string) {
-	resp, err := ctx.HTTPRequest(plugin.HTTPRequest{
-		Method: "GET", URL: "https://miot-spec.org/instance/v2/multiLanguage?urn=" + model, TimeoutMS: 12000})
-	if err != nil {
-		return
-	}
-	body, berr := resp.Body()
-	if berr != nil || resp.Status != 200 {
-		return
-	}
-	var wrapped struct {
-		Data map[string]map[string]string `json:"data"`
-	}
-	if json.Unmarshal(body, &wrapped) != nil {
-		return
-	}
-	zh := wrapped.Data["zh"]
-	if len(zh) == 0 {
-		zh = wrapped.Data["zh_cn"]
-	}
-	if len(zh) == 0 {
-		return
-	}
-	key := func(parts ...any) string {
-		b := ""
-		for i, p := range parts {
-			if i > 0 {
-				b += ":"
+// 字典很小（几 KB）且几乎不变，缓存 30 天；取不到就跳过 —— 显示英文名
+// 比"因为翻译失败连控件都不显示"好得多。
+func applyCachedTranslations(ctx *plugin.Context, sp *miotSpec, model string) {
+	path := "spec-i18n/" + safeModel(model) + ".json"
+	var dict map[string]map[string]string
+	if r, err := ctx.FSRead(path); err == nil && r.Found {
+		if b, berr := r.Data(); berr == nil {
+			var wrapped struct {
+				FetchedAt string                        `json:"fetched_at"`
+				Data      map[string]map[string]string `json:"data"`
 			}
-			b += fmt.Sprintf("%03d", p)
+			if json.Unmarshal(b, &wrapped) == nil {
+				if ts, terr := time.Parse(time.RFC3339, wrapped.FetchedAt); terr == nil &&
+					time.Since(ts) < 30*24*time.Hour {
+					dict = wrapped.Data
+				}
+			}
 		}
-		return b
+	}
+	if dict == nil {
+		resp, err := ctx.HTTPRequest(plugin.HTTPRequest{
+			Method: "GET", URL: "https://miot-spec.org/instance/v2/multiLanguage?urn=" + model, TimeoutMS: 12000})
+		if err != nil || resp.Status != 200 {
+			return
+		}
+		body, berr := resp.Body()
+		if berr != nil {
+			return
+		}
+		var wrapped struct {
+			Data map[string]map[string]string `json:"data"`
+		}
+		if json.Unmarshal(body, &wrapped) != nil || len(wrapped.Data) == 0 {
+			return
+		}
+		dict = wrapped.Data
+		rec, _ := json.Marshal(map[string]any{
+			"fetched_at": time.Now().UTC().Format(time.RFC3339),
+			"data":       dict,
+		})
+		w := plugin.FSWriteRequest{Path: path, QuotaKB: 512}
+		w.SetData(rec)
+		_ = ctx.FSWrite(w)
+	}
+	zh := dict["zh"]
+	if len(zh) == 0 {
+		zh = dict["zh_cn"]
+	}
+	if len(zh) == 0 {
+		return
+	}
+	key := func(iids ...int) string {
+		out := ""
+		for i, v := range iids {
+			if i > 0 {
+				out += ":"
+			}
+			out += fmt.Sprintf("%03d", v)
+		}
+		return out
 	}
 	for si := range sp.Services {
 		svc := &sp.Services[si]
@@ -243,6 +276,7 @@ func applySpecTranslations(ctx *plugin.Context, sp *miotSpec, model string) {
 		}
 	}
 }
+
 
 func loadMIoTSpec(ctx *plugin.Context, model string) (miotSpec, error) {
 	path := "spec-cache/" + safeModel(model) + ".json"
@@ -296,7 +330,6 @@ func loadMIoTSpec(ctx *plugin.Context, model string) (miotSpec, error) {
 	if len(sp.Services) == 0 {
 		return miotSpec{}, errors.New("spec解析失败")
 	}
-	applySpecTranslations(ctx, &sp, model)
 	sum := sha256.Sum256(body)
 	c := specCache{Version: specCacheVersion, Model: model, FetchedAt: time.Now().UTC().Format(time.RFC3339), SHA256: fmt.Sprintf("%x", sum[:]), Spec: body}
 	cb, _ := json.Marshal(c)

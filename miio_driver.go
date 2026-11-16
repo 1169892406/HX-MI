@@ -1308,6 +1308,22 @@ func hasSpecDrivenCap(caps []string, cmd miioCommand) bool {
 //   · action 名从 cmd.Action 或 instance_id 推：`press` → 用 instance 指定的动作名；
 //   · number 的 set_value → 用 instance 指定的属性名；
 //   · switch 的 turn_on/off → 用 instance 指定的 bool 属性。
+
+// specNameMatches 判断实例名是否指向规格里的某个名字。
+//
+// 实例名是 `服务名_名字`（`intelligent_speaker_play_radio`、`clock_stop_alarm`、
+// `speaker_volume`），规格里的名字只是最后那段（`play-radio` / `stop-alarm` / `volume`）。
+// 用**后缀匹配**（把下划线归一成连字符后比较）而不是切最后一个下划线 ——
+// 动作名本身可能带连字符（`stop-alarm`），切会切错。
+func specNameMatches(instName, specName string) bool {
+	a := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(instName)), "_", "-")
+	b := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(specName)), "_", "-")
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || strings.HasSuffix(a, "-"+b)
+}
+
 func execSpecDriven(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
 	inst := commandInstanceID(cmd)
 	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
@@ -1324,19 +1340,25 @@ func execSpecDriven(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
 	if err != nil {
 		return fmt.Errorf("读取规格失败：%w", err)
 	}
-	norm := func(s string) string { return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "_", "-") }
 
 	switch strings.ToLower(cmd.Capability) {
 	case "button":
-		// press：动作名来自 instance_id（前端会把规格里的动作名带下来）。
-		want := norm(inst)
-		if want == "" || want == "press" {
+		/*
+		 * press：动作名来自 instance_id。
+		 *
+		 * ⚠ instance_id 是 `服务名_动作名`（如 `intelligent_speaker_play_radio`），
+		 * 用于平台侧唯一键；**动作名本身只是最后那段**（`play-radio`）。
+		 * 直接拿实例名去比动作名会永远匹配不到（实测报
+		 * 「规格里找不到动作 intelligent_speaker_play_radio」）。
+		 */
+		want := inst
+		if want == "" || strings.EqualFold(want, "press") {
 			return fmt.Errorf("缺少动作名（instance_id）")
 		}
 		for _, svc := range sp.Services {
 			for _, a := range svc.Actions {
-				name := norm(strings.Split(strings.TrimSuffix(strings.Split(a.Type, ":")[3], ""), ":")[0])
-				if name == want || strings.Contains(norm(a.Type), ":"+want+":") {
+				name := actionNameOf(a.Type)
+				if specNameMatches(want, name) {
 					rows, aerr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "action",
 						map[string]any{"did": d.ExternalID, "siid": svc.IID, "aiid": a.IID, "in": []any{}})
 					if aerr != nil {
@@ -1361,10 +1383,10 @@ func execSpecDriven(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
 		if !tok {
 			return fmt.Errorf("数值参数不可用（收到 %v）", raw)
 		}
-		want := norm(inst)
+		want := inst
 		for _, svc := range sp.Services {
 			for _, pr := range svc.Properties {
-				if norm(strings.Split(pr.Type, ":")[3]) != want {
+				if !specNameMatches(want, actionNameOf(pr.Type)) {
 					continue
 				}
 				rows, perr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/set",
@@ -1383,14 +1405,14 @@ func execSpecDriven(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
 		return fmt.Errorf("规格里找不到可选属性 %q", inst)
 	case "switch":
 		// 非主开关的 switch 实例（如麦克风静音 / 睡眠模式）：写该 bool 属性。
-		want := norm(inst)
+		want := inst
 		if want == "" {
 			return fmt.Errorf("缺少属性名（instance_id）")
 		}
 		on := strings.EqualFold(cmd.Action, "turn_on")
 		for _, svc := range sp.Services {
 			for _, pr := range svc.Properties {
-				if norm(strings.Split(pr.Type, ":")[3]) != want || pr.Format != "bool" {
+				if !specNameMatches(want, actionNameOf(pr.Type)) || pr.Format != "bool" {
 					continue
 				}
 				rows, perr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/set",
