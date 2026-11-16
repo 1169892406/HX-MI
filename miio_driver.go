@@ -89,6 +89,31 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 	if d == nil {
 		return errors.New("设备未登记")
 	}
+	/*
+	 * 云端设备分支（2026-11-17）：`host` 为空的设备（红外遥控这类）没有局域网
+	 * 地址，LAN 路径必然失败，而且它们连 miio_token 都没有 —— 所以必须在
+	 * `resolveCommandBinding` 与 token 读取**之前**分流。
+	 *
+	 * 下发方式：`miotspec/action` 的 turn-on / turn-off（按规格找 aiid）。
+	 * 本轮只做开关：先验证"红外到底能不能动作"，风速/温度用同一通路再扩。
+	 */
+	if strings.TrimSpace(d.Host) == "" {
+		switch strings.ToLower(cmd.Action) {
+		case "turn_on", "turn_off":
+			on := strings.EqualFold(cmd.Action, "turn_on")
+			if err := cloudExecuteIRPower(ctx, *d, on); err != nil {
+				return err
+			}
+			/*
+			 * 不伪造状态：红外没有可回读的开关属性（规格里只有 ir-mode /
+			 * ir-temperature），把"我发了 turn_on"当"设备已开"就是乐观确认。
+			 * 平台侧该命令会以 acked=false 呈现 —— 这是诚实的。
+			 */
+			return nil
+		default:
+			return fmt.Errorf("红外遥控暂只支持开关（收到 %q；风速/温度按同一通路待扩）", cmd.Action)
+		}
+	}
 	cmd, err = resolveCommandBinding(ctx, *d, cmd)
 	if err != nil {
 		return err
@@ -101,51 +126,7 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	if strings.EqualFold(cmd.Action, "toggle") {
-		siid, piid := 2, 1
-		if v, ok := cmd.Params["siid"].(float64); ok {
-			siid = int(v)
-		}
-		if v, ok := cmd.Params["piid"].(float64); ok {
-			piid = int(v)
-		}
-		res, e := miioBatchProperties(ctx, *d, token, "get_properties", []map[string]any{{"did": d.ExternalID, "siid": siid, "piid": piid}})
-		if e != nil {
-			return e
-		}
-		current, ok := extractMIoTBool(res)
-		if !ok {
-			return errors.New("toggle 当前值不可用")
-		}
-		method = "set_properties"
-		params = []map[string]any{{"did": d.ExternalID, "siid": siid, "piid": piid, "value": !current}}
-	}
-	/*
-	 * ★★★ 2026-11-16（用户「正常这个台灯还有温度数据啊，现在怎么看不见」）：
-	 *
-	 * 这里原来发的是 `{"last_command":"turn_on","available":true}` —— 那是**插件
-	 * 自己的记账**，不是能力结构。平台按 (capability, property) 存状态（
-	 * `device_states_current` 的键就是这两者），收到这种报文只能丢掉：
-	 * 界面上既没有开关态、也没有温度，命令的 acked 永远 false。
-	 *
-	 * 现在按能力结构发（契约见 pluginres.StateHandler）：
-	 *
-	 *	{"switch":{"power":true},"sensor":{"temperature":26.5}}
-	 *
-	 * 温度从哪来：本型号（如 chuangmi.plug.m3）的 MIoT 规格里
-	 * `siid=2, piid=2` 就是 temperature。读失败**不影响命令本身** ——
-	 * 开关已经切过去了，不能因为温度读不到就报错让用户以为没开成。
-	 * 所以温度单独 try，失败只记 Warn。
-	 */
 	state := map[string]any{}
-	/*
-	 * 老 miio 协议分支（2026-11-16）：`chuangmi.plug.m3` 这类设备只认
-	 * `set_power ["on"/"off"]` + `get_prop`，MIoT 的 siid/piid 在它身上不可用。
-	 *
-	 * 关键差别不在"怎么发命令"，而在**状态从哪来**：
-	 * 这里发完命令立刻 `get_prop ["power","temperature"]` **回读设备真值**并上报，
-	 * 而不是把命令意图当成结果上报 —— 后者会让"设备没动"看起来像成功。
-	 */
 	if isLegacyDevice(ctx, *d, token) {
 		switch strings.ToLower(cmd.Action) {
 		case "turn_on", "turn_off":
@@ -746,4 +727,118 @@ func cloudNumber(v any) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// —— 云端写通道（红外设备没有局域网地址，只能经云端；2026-11-17）——
+//
+// 用户口径：「遥控数据已经配置并且存在本地，那么离线可以控制」——那是小爱音箱
+// 自己的行为（遥控码存在音箱里）。**平台要发指令仍然得通过音箱**，而音箱只接受
+// 云端 `miotspec/*` 或本地 miio 两根入口。参考实现 hass-xiaomi-miot 走的是云端：
+//
+//	async_set_props  → miotspec/prop/set
+//	async_do_action  → miotspec/action
+//
+// 所以本轮先把云端写通道补上；本地 miio 红外方法留待下一步探测（方法名未知，
+// 不靠猜写代码）。
+
+// cloudRequestMIoTSpec 调云端 miotspec/<api>（prop/set、action、prop/get 共用）。
+//
+// 与参考实现一致：body **只有 params**（不要 datasource，这个字段曾让 BLE
+// 读取假性失败三轮）。返回 result 数组。
+func cloudRequestMIoTSpec(ctx *plugin.Context, sessionID, ssecurity, deviceID, api string,
+	params []map[string]any) ([]map[string]any, error) {
+	body, err := json.Marshal(map[string]any{"params": params})
+	if err != nil {
+		return nil, err
+	}
+	raw, err := apiPostRC4GuestDevice(ctx, sessionID, ssecurity, deviceID,
+		"https://api.io.mi.com/app/miotspec/"+api, string(body))
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Code    int              `json:"code"`
+		Message string           `json:"message"`
+		Result  []map[string]any `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, errors.New("云端响应解析失败")
+	}
+	if resp.Code != 0 {
+		return nil, fmt.Errorf("云端返回 code=%d message=%s", resp.Code, resp.Message)
+	}
+	return resp.Result, nil
+}
+
+
+/*
+ * 红外遥控：**动作**而不是属性（2026-11-17 按规格核对）。
+ *
+ * `miir.aircondition.ir02` 的 service iid=2 里：
+ *
+ *	action iid=5  urn:miot-spec-v2:action:turn-off:…
+ *	action iid=6  urn:miot-spec-v2:action:turn-on:…
+ *	prop   iid=1  ir-mode (uint8)
+ *	prop   iid=2  ir-temperature (float)
+ *
+ * 也就是说开关是 `miotspec/action`（带 aiid），**不是** `prop/set`。
+ * 参考实现的 `button_actions: turn_on,turn_off` 也印证了这一点。
+ *
+ * 为什么按名字找而不是写死 aiid：不同红外型号（ir01/ir02/xiaomi.ir.*）的
+ * 动作编号不同，写死必与实机漂移 —— 温度属性那次已经踩过。
+ */
+func cloudIRPowerAction(ctx *plugin.Context, model string, on bool) (int, int, bool) {
+	typ, ok := lookupModelType(model)
+	if !ok {
+		return 0, 0, false
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return 0, 0, false
+	}
+	want := ":turn-off:"
+	if on {
+		want = ":turn-on:"
+	}
+	for _, svc := range sp.Services {
+		for _, a := range svc.Actions {
+			if strings.Contains(strings.ToLower(a.Type), want) {
+				return svc.IID, a.IID, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// cloudExecuteIRPower 经云端发一次红外开关动作。
+//
+// 红外是"发出去就不管"的语义：设备不回执、也没有可回读的开关属性
+// （规格里只有 ir-mode / ir-temperature）。所以这里**不伪造状态上报** ——
+// 上报"我发了 turn_on"当成"设备已开"正是之前踩过的乐观确认。
+func cloudExecuteIRPower(ctx *plugin.Context, d miioDevice, on bool) error {
+	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
+	if err != nil {
+		return fmt.Errorf("无云会话（需先登录）：%w", err)
+	}
+	siid, aiid, ok := cloudIRPowerAction(ctx, d.Model, on)
+	if !ok {
+		return fmt.Errorf("型号 %s 的规格里找不到 turn-on/turn-off 动作（无法经云端控制）", d.Model)
+	}
+	/*
+	 * 无入参的动作**不要带 `in` 字段**（2026-11-17 实测）。
+	 *
+	 * 带 `"in": []` 时云端回 `code=-8 data type not valid` —— 小米把空数组当成
+	 * 类型不符，而不是"没有参数"。去掉后按"只有 did/siid/aiid"的形状发。
+	 */
+	rows, err := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "action",
+		[]map[string]any{{"did": d.ExternalID, "siid": siid, "aiid": aiid}})
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if code, ok := r["code"].(float64); ok && int(code) != 0 {
+			return fmt.Errorf("设备拒绝了红外动作（code=%d siid=%d aiid=%d）", int(code), siid, aiid)
+		}
+	}
+	return nil
 }
