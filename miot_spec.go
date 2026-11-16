@@ -27,6 +27,8 @@ type miotSpec struct {
 type miotService struct {
 	IID        int            `json:"iid"`
 	Type       string         `json:"type"`
+	// Name 是 multiLanguage 接口给的中文名（英文接口没有这个字段）。
+	Name string `json:"name"`
 	Properties []miotProperty `json:"properties"`
 	Actions    []miotAction   `json:"actions"`
 	Events     []miotEvent    `json:"events"`
@@ -38,6 +40,7 @@ type miotValueItem struct {
 type miotProperty struct {
 	IID        int             `json:"iid"`
 	Type       string          `json:"type"`
+	Name       string          `json:"name"`
 	Format     string          `json:"format"`
 	Access     []string        `json:"access"`
 	Unit       string          `json:"unit"`
@@ -47,6 +50,7 @@ type miotProperty struct {
 type miotAction struct {
 	IID  int    `json:"iid"`
 	Type string `json:"type"`
+	Name string `json:"name"`
 	In   []int  `json:"in"`
 	Out  []int  `json:"out"`
 }
@@ -182,6 +186,64 @@ func readCachedSpec(ctx *plugin.Context, path, model string) (miotSpec, bool) {
 	return sp, true
 }
 
+
+// applySpecTranslations 用翻译字典给服务/属性/动作补中文名（失败不影响功能）。
+//
+// 字典形状：{"data":{"zh":{"service:002":"音箱","service:002:action:003":"播放"}}}
+// 键的编号是**3 位补零**（参考实现 MiotSpecInstance 的 unique_name 也是这么拼的）。
+func applySpecTranslations(ctx *plugin.Context, sp *miotSpec, model string) {
+	resp, err := ctx.HTTPRequest(plugin.HTTPRequest{
+		Method: "GET", URL: "https://miot-spec.org/instance/v2/multiLanguage?urn=" + model, TimeoutMS: 12000})
+	if err != nil {
+		return
+	}
+	body, berr := resp.Body()
+	if berr != nil || resp.Status != 200 {
+		return
+	}
+	var wrapped struct {
+		Data map[string]map[string]string `json:"data"`
+	}
+	if json.Unmarshal(body, &wrapped) != nil {
+		return
+	}
+	zh := wrapped.Data["zh"]
+	if len(zh) == 0 {
+		zh = wrapped.Data["zh_cn"]
+	}
+	if len(zh) == 0 {
+		return
+	}
+	key := func(parts ...any) string {
+		b := ""
+		for i, p := range parts {
+			if i > 0 {
+				b += ":"
+			}
+			b += fmt.Sprintf("%03d", p)
+		}
+		return b
+	}
+	for si := range sp.Services {
+		svc := &sp.Services[si]
+		if n, ok := zh["service:"+key(svc.IID)]; ok && n != "" {
+			svc.Name = n
+		}
+		for pi := range svc.Properties {
+			pr := &svc.Properties[pi]
+			if n, ok := zh["service:"+key(svc.IID)+":property:"+key(pr.IID)]; ok && n != "" {
+				pr.Name = n
+			}
+		}
+		for ai := range svc.Actions {
+			a := &svc.Actions[ai]
+			if n, ok := zh["service:"+key(svc.IID)+":action:"+key(a.IID)]; ok && n != "" {
+				a.Name = n
+			}
+		}
+	}
+}
+
 func loadMIoTSpec(ctx *plugin.Context, model string) (miotSpec, error) {
 	path := "spec-cache/" + safeModel(model) + ".json"
 	if sp, ok := readCachedSpec(ctx, path, model); ok {
@@ -194,8 +256,20 @@ func loadMIoTSpec(ctx *plugin.Context, model string) (miotSpec, error) {
 	if sp, ok := readCachedSpec(ctx, path, model); ok {
 		return sp, nil
 	}
-	u := "https://miot-spec.org/miot-spec-v2/instance?type=" + model
-	resp, e := ctx.HTTPRequest(plugin.HTTPRequest{Method: "GET", URL: u, TimeoutMS: 15000})
+	/*
+	 * 规格结构与**中文名**分两个接口（2026-11-17 实测，与参考实现一致）：
+	 *
+	 *   /miot-spec-v2/instance?type=<urn>              → 结构与英文 description
+	 *   /instance/v2/multiLanguage?urn=<urn>            → 翻译字典 {"data":{"zh":{...}}}
+	 *
+	 * 参考实现 miot_spec.py 也是这么拿的：结构 + 单独的 langs 请求
+	 * （`dat.get('data')` 拿字典，键形如 `service:002:action:001`）。
+	 *
+	 * 为什么必须拿中文：界面上要显示「播放电台」而不是「Play Radio」——
+	 * 用户对着英文名根本认不出那是干什么的。
+	 */
+	resp, e := ctx.HTTPRequest(plugin.HTTPRequest{
+		Method: "GET", URL: "https://miot-spec.org/miot-spec-v2/instance?type=" + model, TimeoutMS: 15000})
 	if e != nil {
 		return miotSpec{}, fmt.Errorf("spec网络失败且无有效缓存: %w", e)
 	}
@@ -205,8 +279,24 @@ func loadMIoTSpec(ctx *plugin.Context, model string) (miotSpec, error) {
 	}
 	var sp miotSpec
 	if json.Unmarshal(body, &sp) != nil || len(sp.Services) == 0 {
+		/*
+		 * multiLanguage 接口把规格包在 `{"code":0,"data":{...}}` 里
+		 * （参考实现 miot_spec.py:457 用的就是 `dat.get('data')`）。
+		 * 这里兼容两种形状：先按裸规格解，失败再剥一层 data。
+		 */
+		var wrapped struct {
+			Code int       `json:"code"`
+			Data miotSpec  `json:"data"`
+		}
+		if json.Unmarshal(body, &wrapped) != nil || len(wrapped.Data.Services) == 0 {
+			return miotSpec{}, errors.New("spec解析失败")
+		}
+		sp = wrapped.Data
+	}
+	if len(sp.Services) == 0 {
 		return miotSpec{}, errors.New("spec解析失败")
 	}
+	applySpecTranslations(ctx, &sp, model)
 	sum := sha256.Sum256(body)
 	c := specCache{Version: specCacheVersion, Model: model, FetchedAt: time.Now().UTC().Format(time.RFC3339), SHA256: fmt.Sprintf("%x", sum[:]), Spec: body}
 	cb, _ := json.Marshal(c)

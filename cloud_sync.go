@@ -212,6 +212,24 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		if !stringInSlice(caps, "switch") && modelHasTurnOnAction(ctx, c.Model) {
 			caps = append(caps, "switch")
 		}
+		/*
+		 * 规格驱动的**可写属性与动作**（2026-11-17 用户截图那 10 项）。
+		 *
+		 * HA 那个插件按规格动态生成实体：每个可写属性一个开关、每个动作一个按钮，
+		 * 所以同一台音箱能出「麦克风静音 / 睡眠模式 / 停止闹钟 / 播放电台 / 唤醒」
+		 * 这些命名控件。我们平台按能力类型渲染固定控件，所以要把规格里的东西
+		 * **先投影成能力实例**，界面才有位置挂。
+		 *
+		 * 具体做法见 projectSpecControls：给每个可写 bool 属性生成一个
+		 * `switch` 实例（instance_id 用属性名），给每个可写数值属性生成一个
+		 * `number` 实例，给每个动作生成一个 `button` 实例。
+		 */
+		extraCaps := projectSpecControls(ctx, c.Model)
+		for _, ec := range extraCaps {
+			if !stringInSlice(caps, ec) {
+				caps = append(caps, ec)
+			}
+		}
 		host := c.LocalIP
 		name := c.Name
 		if name == "" {
@@ -585,6 +603,64 @@ func modelAllowed(model string) bool {
 func sha256Hex(b []byte) string {
 	s := sha256.Sum256(b)
 	return fmt.Sprintf("%x", s[:])
+}
+
+
+// projectSpecControls 从规格里推导"可写属性 / 动作"对应的平台能力名。
+//
+// # 为什么这么做（2026-11-17）
+//
+// 用户拿 HA 插件的截图对照：同一台小爱音箱Pro，那边有「麦克风静音、睡眠模式、
+// 停止闹钟、播放电台、唤醒、随机播放」等 10 个命名控件，我们这边一个都没有。
+// 根因不是规格缺数据（实测 9/10 都在规格里），而是**平台按能力类型渲染固定控件**：
+// `switch` 只画一个"开关"、`button` 只画一个"按下"。
+//
+// 所以先把规格里的可写属性/动作投影成能力，界面才有位置挂：
+//   · 可写 bool 属性（mute / sleep-mode）→ `switch` 实例
+//   · 可写数值属性（volume）             → `number` 实例
+//   · 动作（stop-alarm / play-radio …）  → `button` 实例
+//
+// 返回的是**能力名集合**（平台按名字去重），实例明细由 spec_json 承载。
+func projectSpecControls(ctx *plugin.Context, model string) []string {
+	typ, ok := lookupModelType(model)
+	if !ok {
+		return nil
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, svc := range sp.Services {
+		if svc.IID == 1 {
+			continue // device-information：厂商/型号/固件，不是控件
+		}
+		for _, pr := range svc.Properties {
+			if !hasAccess(pr.Access, "write") {
+				continue
+			}
+			switch pr.Format {
+			case "bool":
+				out = appendUnique(out, "switch")
+			case "uint8", "uint16", "uint32", "float":
+				out = appendUnique(out, "number")
+			}
+		}
+		if len(svc.Actions) > 0 {
+			out = appendUnique(out, "button")
+		}
+	}
+	return out
+}
+
+// appendUnique 去重追加。
+func appendUnique(list []string, v string) []string {
+	for _, x := range list {
+		if x == v {
+			return list
+		}
+	}
+	return append(list, v)
 }
 
 // isSensorLikeModel 判断型号是否属于"只读传感器"（需要周期读取而不是等下命令）。

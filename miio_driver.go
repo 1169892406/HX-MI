@@ -36,6 +36,44 @@ type miioCommand struct {
 	// 带参命令全部拿到空参数（t234 实测：Binding 不支持 action=set_property）。
 	// 二者都收，优先 params（内部/测试），缺省回落到 args（宿主真实下发）。
 	Args map[string]any `json:"args"`
+	/*
+	 * InstanceID 是能力实例标识（`sleep_mode` / `volume` / `wake_up`…）。
+	 *
+	 * ⚠ 平台当前**不投递**这个字段（resource_host.go 只发 external_id/
+	 * capability/action/args/request_id）—— 见 platformsGapNote。
+	 * 所以本插件先从 `args` 里取同名键兜底（前端可以把实例名放进 parameters）。
+	 * 待平台补上该字段后，这条路自动变成直读，不需要再改插件。
+	 */
+	InstanceID string `json:"instance_id"`
+}
+
+/*
+ * platformsGapNote：平台设备命令缺少 instance_id 透传（2026-11-17 核实）。
+ *
+ * `internal/app/pluginsvc/resource_host.go` 的投递体只有
+ * external_id / capability / action / args / request_id。于是"同一能力多实例"
+ * （多个可写属性 = 多个 switch 实例、多个动作 = 多个 button 实例）在插件侧
+ * **无法区分是哪一个** —— 只能靠 args 里带名字约定。
+ *
+ * 这是平台侧的窄口子，不是插件能自行补齐的；本插件先用 args 约定兜住功能。
+ */
+func commandInstanceID(cmd miioCommand) string {
+	if v := strings.TrimSpace(cmd.InstanceID); v != "" {
+		return v
+	}
+	for _, k := range []string{"instance_id", "instance", "property", "action_name"} {
+		if raw, ok := cmd.Params[k]; ok {
+			if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+		if raw, ok := cmd.Args[k]; ok {
+			if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
 }
 
 func miioPKCS7(b []byte) []byte {
@@ -109,6 +147,28 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 	 *   svc3 actions play/pause/next/previous + playing-state(uint8)
 	 *   svc5 actions wake-up / play-music / play-text
 	 */
+	/*
+	 * 规格驱动的通用控制（2026-11-17）：`button` / `number` / 额外 `switch` 实例。
+	 *
+	 * 这些能力不是固定语义，而是**规格里的某个动作或可写属性**：
+	 *   button + action(mute/stop_alarm/play_radio/wake_up…) → 调对应 action
+	 *   number + set_value(volume)                          → 写对应属性
+	 *   switch + instance_id(如 sleep_mode)                 → 写该 bool 属性
+	 *
+	 * 平台发的命令 shape 由前端 capabilityControls 决定：
+	 *   button → action:"press"，我们按 capability 的 spec 元数据找动作名（见下）
+	 *   number → action:"set_value" + parameters.value
+	 *   switch → action:"turn_on"/"turn_off"（沿用开关语义）
+	 *
+	 * 因为一个设备可能有多个 button/number 实例，前端会把 instance_id 带上，
+	 * 我们据此定位规格里的具体动作/属性。
+	 */
+	if hasSpecDrivenCap(d.Capabilities, cmd) {
+		if err := execSpecDriven(ctx, *d, cmd); err != nil {
+			return err
+		}
+		return nil
+	}
 	if hasCap(d.Capabilities, "media_player") {
 		if err := cloudMediaCommand(ctx, *d, cmd); err != nil {
 			return err
@@ -1229,4 +1289,124 @@ func cloudMediaState(ctx *plugin.Context, d miioDevice) (map[string]any, error) 
 		return nil, errors.New("云端没有返回媒体状态")
 	}
 	return map[string]any{"media_player": mp}, nil
+}
+
+// hasSpecDrivenCap 判断这条命令是不是"规格驱动"的能力（button / number / 非主开关的 switch 实例）。
+//
+// 判据：能力名是 button/number，或 switch 且 instance_id 不是空/switch/number 之类主实例。
+func hasSpecDrivenCap(caps []string, cmd miioCommand) bool {
+	cap := strings.ToLower(cmd.Capability)
+	if cap == "button" || cap == "number" {
+		return true
+	}
+	return false
+}
+
+// execSpecDriven 把一条"规格驱动"的命令落到云端 action / prop/set。
+//
+// 定位规则（都按**规格里的事实**找，不写死 iid）：
+//   · action 名从 cmd.Action 或 instance_id 推：`press` → 用 instance 指定的动作名；
+//   · number 的 set_value → 用 instance 指定的属性名；
+//   · switch 的 turn_on/off → 用 instance 指定的 bool 属性。
+func execSpecDriven(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
+	inst := commandInstanceID(cmd)
+	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
+	if err != nil {
+		return fmt.Errorf("无云会话（需先登录）：%w", err)
+	}
+	defer func() { _ = ctx.HTTPClose(sessionID) }()
+
+	typ, ok := lookupModelType(d.Model)
+	if !ok {
+		return fmt.Errorf("型号 %s 不在目录中", d.Model)
+	}
+	sp, err := loadMIoTSpec(ctx, typ)
+	if err != nil {
+		return fmt.Errorf("读取规格失败：%w", err)
+	}
+	norm := func(s string) string { return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "_", "-") }
+
+	switch strings.ToLower(cmd.Capability) {
+	case "button":
+		// press：动作名来自 instance_id（前端会把规格里的动作名带下来）。
+		want := norm(inst)
+		if want == "" || want == "press" {
+			return fmt.Errorf("缺少动作名（instance_id）")
+		}
+		for _, svc := range sp.Services {
+			for _, a := range svc.Actions {
+				name := norm(strings.Split(strings.TrimSuffix(strings.Split(a.Type, ":")[3], ""), ":")[0])
+				if name == want || strings.Contains(norm(a.Type), ":"+want+":") {
+					rows, aerr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "action",
+						map[string]any{"did": d.ExternalID, "siid": svc.IID, "aiid": a.IID, "in": []any{}})
+					if aerr != nil {
+						return aerr
+					}
+					for _, r := range rows {
+						if code, ok := r["code"].(float64); ok && int(code) != 0 {
+							return fmt.Errorf("设备拒绝动作 %s（code=%d）", want, int(code))
+						}
+					}
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("规格里找不到动作 %q", inst)
+	case "number":
+		raw, ok := cmd.Params["value"]
+		if !ok {
+			raw = cmd.Params["number"]
+		}
+		v, tok := cloudNumber(raw)
+		if !tok {
+			return fmt.Errorf("数值参数不可用（收到 %v）", raw)
+		}
+		want := norm(inst)
+		for _, svc := range sp.Services {
+			for _, pr := range svc.Properties {
+				if norm(strings.Split(pr.Type, ":")[3]) != want {
+					continue
+				}
+				rows, perr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/set",
+					[]map[string]any{{"did": d.ExternalID, "siid": svc.IID, "piid": pr.IID, "value": v}})
+				if perr != nil {
+					return perr
+				}
+				for _, r := range rows {
+					if code, ok := r["code"].(float64); ok && int(code) != 0 {
+						return fmt.Errorf("设备拒绝写入 %s（code=%d）", want, int(code))
+					}
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("规格里找不到可选属性 %q", inst)
+	case "switch":
+		// 非主开关的 switch 实例（如麦克风静音 / 睡眠模式）：写该 bool 属性。
+		want := norm(inst)
+		if want == "" {
+			return fmt.Errorf("缺少属性名（instance_id）")
+		}
+		on := strings.EqualFold(cmd.Action, "turn_on")
+		for _, svc := range sp.Services {
+			for _, pr := range svc.Properties {
+				if norm(strings.Split(pr.Type, ":")[3]) != want || pr.Format != "bool" {
+					continue
+				}
+				rows, perr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/set",
+					[]map[string]any{{"did": d.ExternalID, "siid": svc.IID, "piid": pr.IID, "value": on}})
+				if perr != nil {
+					return perr
+				}
+				for _, r := range rows {
+					if code, ok := r["code"].(float64); ok && int(code) != 0 {
+						return fmt.Errorf("设备拒绝写入 %s（code=%d）", want, int(code))
+					}
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("规格里找不到 bool 属性 %q", inst)
+	}
+	return fmt.Errorf("不支持的规格驱动能力 %q", cmd.Capability)
 }
