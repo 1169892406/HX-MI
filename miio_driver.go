@@ -193,13 +193,19 @@ func readTemperatureProperty(ctx *plugin.Context, d miioDevice, token []byte) (f
 	rows, err := miioBatchProperties(ctx, d, token, "get_properties",
 		[]map[string]any{{"did": d.ExternalID, "siid": 2, "piid": 2}})
 	if err != nil {
+		// ⚠ 必须留原因：温度是**可选**属性，读不到不该拖累命令，
+		// 但"读不到却一声不响"会让排查变成猜（本仓反复踩过的坑）。
+		// 2026-11-16 实测就是靠它定位"为什么卡片上没有温度"。
+		ctx.LogWarn("hx-mi 温度读取失败（设备 %s）：%v", d.ExternalID, err)
 		return 0, false
 	}
 	row := firstRow(rows)
 	if row == nil {
+		ctx.LogWarn("hx-mi 温度读取返回空（设备 %s model=%s）", d.ExternalID, d.Model)
 		return 0, false
 	}
 	if code, ok := row["code"].(float64); ok && int(code) != 0 {
+		ctx.LogWarn("hx-mi 温度读取被设备拒绝（设备 %s code=%d siid=2 piid=2）", d.ExternalID, int(code))
 		return 0, false
 	}
 	switch v := row["value"].(type) {
@@ -208,6 +214,7 @@ func readTemperatureProperty(ctx *plugin.Context, d miioDevice, token []byte) (f
 	case int:
 		return float64(v), true
 	}
+	ctx.LogWarn("hx-mi 温度值类型异常（设备 %s value=%v）", d.ExternalID, row["value"])
 	return 0, false
 }
 

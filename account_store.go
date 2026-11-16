@@ -263,6 +263,21 @@ func (s *accountStore) upsert(identity, masked, region string, secret []byte) (a
 			a.Region = region
 			a.UpdatedAt = now
 			a.Revision++
+			/*
+			 * ★★★ 2026-11-16（用户「重新登录了」后实测：账号变成 ready_unbound，
+			 * 界面显示「待绑定家庭」，但同步其实是好的）：
+			 *
+			 * 重新登录时把 HouseholdID **丢了**。而这个账号的数据本来就存在
+			 * `<household>/<plugin>/` 作用域的 FS 里 —— 它属于哪个家庭是**由存储位置
+			 * 决定的**，不是由用户手动绑定决定的。丢了绑定只会让界面多一个没意义的
+			 * 警告，还会让人以为"没绑好所以同步失败"（实际无关）。
+			 *
+			 * 现在：绑定为空就按当前上下文补上；上下文也没有才保持 ready_unbound
+			 * （那才是真的还没归属）。
+			 */
+			if a.HouseholdID == "" && s.ctx != nil {
+				a.HouseholdID = s.ctx.HouseholdID
+			}
 			if a.HouseholdID == "" {
 				a.State = "ready_unbound"
 			} else {

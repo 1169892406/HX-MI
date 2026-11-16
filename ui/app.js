@@ -595,21 +595,40 @@
     return '其他家庭（' + String(id).slice(0, 8) + '…）';
   }
 
-  /** 家庭下拉：只能选**当前**家庭（插件是家庭作用域的，跨家庭调用平台不允许）。 */
+  /*
+   * 家庭下拉：可选项 = 「未绑定」+ **当前**家庭。
+   *
+   * 为什么不能列别的家庭：插件是家庭作用域的（数据存在 <household>/<plugin>/ 下），
+   * 平台也不允许跨家庭调用 —— 列出来只会让人选了之后失败。
+   *
+   * 但必须**可选**（2026-11-16 用户「换绑家庭」）：
+   *   · 选「未绑定」= 解除这条同步，账号凭据保留；
+   *   · 选当前家庭 = 绑定/换绑到本家庭（重登后账号会短暂处于未绑定态，
+   *     没有这个入口就永远绑不回来 —— 之前那种"下拉只有一个灰选项"是死路）。
+   */
   function fillHouseholdSelect(sel, currentId) {
     sel.innerHTML = '';
-    var opt = document.createElement('option');
-    if (!household) {
-      opt.value = currentId || '';
-      opt.textContent = currentId ? String(currentId).slice(0, 8) + '…' : '未绑定';
+    var none = document.createElement('option');
+    none.value = '';
+    none.textContent = '未绑定';
+    sel.appendChild(none);
+    if (household) {
+      var opt = document.createElement('option');
+      opt.value = household.id;
+      opt.textContent = household.name;
       sel.appendChild(opt);
+      sel.disabled = false;
+    } else {
+      // 还读不到家庭时保留当前值，但禁用（避免"选了却无处保存"）。
+      if (currentId) {
+        var keep = document.createElement('option');
+        keep.value = currentId;
+        keep.textContent = String(currentId).slice(0, 8) + '…';
+        sel.appendChild(keep);
+      }
       sel.disabled = true;
-      return;
     }
-    opt.value = household.id;
-    opt.textContent = household.name;
-    sel.appendChild(opt);
-    sel.disabled = false;
+    sel.value = currentId || '';
   }
 
   /*
@@ -680,15 +699,31 @@
      * 账号在同步这里没有可执行的事，把它列进来只会让人以为它已经在同步。
      * 账号本身仍在上面「小米账号」卡里可见、可删。
      */
+    /*
+     * 列表列**所有账号**（2026-11-16 用户「同步列表需要增减编辑，不然无法…换绑家庭」）。
+     *
+     * 原来只列"已绑定家庭"的账号 —— 于是重登后变成未绑定的账号**根本不出现**，
+     * 用户没有任何入口把它绑回来（只能去删账号重登，代价太大）。
+     * 现在未绑定的也列出来，家庭列选当前家庭即完成绑定。
+     */
+    var all = items.slice();
+    // 已绑定的排前面：用户最常看的是正在同步的那几条。
+    all.sort(function (a, b) {
+      var ha = entryValue(a).householdId ? 0 : 1;
+      var hb = entryValue(b).householdId ? 0 : 1;
+      return ha - hb;
+    });
     var bound = items.filter(function (a) { return !!entryValue(a).householdId; });
     var cnt = el('sync-count');
-    if (cnt) cnt.textContent = bound.length ? bound.length + ' 条同步' : '';
+    if (cnt) {
+      cnt.textContent = bound.length ? bound.length + ' 条同步' : (items.length ? '未绑定' : '');
+    }
 
     // 空列表就**留空**（2026-11-10 用户口径：「同步列表空的就应该显示空白」）。
     // 不写占位文案：入口（＋ 添加同步）就在卡头，空态自己会说话；
     // 再补一句"还没有…"只是把一行噪音塞进一个本来就该干净的区域。
-    if (!bound.length) return;
-    bound.forEach(function (a) {
+    if (!all.length) return;
+    all.forEach(function (a) {
       var id = a.account_id || '';
       var name = names[id] || a.masked_account || id;
       var draft = draftEdits[id] || {};
@@ -730,6 +765,33 @@
         setDraft(id, { household_id: sel.value || null });
       });
       mid.appendChild(sel);
+
+      /*
+       * 同步间隔：**行内可改**（2026-11-16 用户「无法修改同步时间」）。
+       *
+       * 之前间隔只能在「添加同步」表单里设一次，之后改不了 —— 想调频率只能
+       * 删掉重加。这里给一个始终可见的下拉：选完进草稿，页头「保存配置」统一提交。
+       *
+       * 选项固定几档而不是任意输入：分钟级任意值容易填出 7 分钟这种"看不出规律"
+       * 的周期，而调度本身是 5 分钟一轮的粒度。
+       */
+      var iv = document.createElement('select');
+      iv.setAttribute('aria-label', '同步间隔（分钟）');
+      var curMin = Math.max(1, Math.round(val.intervalSeconds / MIN_PER_MINUTE));
+      [5, 10, 15, 30, 60, 120].concat(curMin && [5,10,15,30,60,120].indexOf(curMin) < 0 ? [curMin] : [])
+        .forEach(function (m) {
+          var o = document.createElement('option');
+          o.value = String(m);
+          o.textContent = '每 ' + m + ' 分钟';
+          if (m === curMin) o.selected = true;
+          iv.appendChild(o);
+        });
+      iv.addEventListener('change', function () {
+        var m = parseInt(iv.value, 10);
+        if (!isNaN(m) && m > 0) setDraft(id, { interval_seconds: m * MIN_PER_MINUTE });
+      });
+      mid.appendChild(iv);
+
       row.appendChild(mid);
 
       var ops = document.createElement('div');
