@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,6 +138,61 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 	 * 所以温度单独 try，失败只记 Warn。
 	 */
 	state := map[string]any{}
+	/*
+	 * 老 miio 协议分支（2026-11-16）：`chuangmi.plug.m3` 这类设备只认
+	 * `set_power ["on"/"off"]` + `get_prop`，MIoT 的 siid/piid 在它身上不可用。
+	 *
+	 * 关键差别不在"怎么发命令"，而在**状态从哪来**：
+	 * 这里发完命令立刻 `get_prop ["power","temperature"]` **回读设备真值**并上报，
+	 * 而不是把命令意图当成结果上报 —— 后者会让"设备没动"看起来像成功。
+	 */
+	if isLegacyDevice(ctx, *d, token) {
+		switch strings.ToLower(cmd.Action) {
+		case "turn_on", "turn_off":
+			want := "on"
+			if strings.EqualFold(cmd.Action, "turn_off") {
+				want = "off"
+			}
+			if _, err := miioExchange(ctx, *d, token, "set_power", []string{want}); err != nil {
+				return err
+			}
+		case "toggle":
+			// 老协议也有 toggle 语义的设备，但不通用：先读再写更可靠。
+			cur, err := legacyGetProp(ctx, *d, token, []string{"power"})
+			if err != nil {
+				return err
+			}
+			on, ok := legacyPowerValue(cur["power"])
+			if !ok {
+				return errors.New("toggle 当前值不可用")
+			}
+			want := "on"
+			if on {
+				want = "off"
+			}
+			if _, err := miioExchange(ctx, *d, token, "set_power", []string{want}); err != nil {
+				return err
+			}
+		default:
+			// 其它动作（亮度/模式等）不属于本次范围：保持原路径。
+		}
+		// 回读真值：power 一定有；temperature 有就一起上报。
+		got, gerr := legacyGetProp(ctx, *d, token, []string{"power", "temperature"})
+		if gerr == nil {
+			if on, ok := legacyPowerValue(got["power"]); ok {
+				state["switch"] = map[string]any{"power": on}
+			}
+			if t, ok := legacyNumber(got["temperature"]); ok && t > -40 && t < 80 {
+				state["sensor"] = map[string]any{"temperature": t}
+			}
+		} else {
+			ctx.LogWarn("hx-mi 老协议状态回读失败（设备 %s）：%v", d.ExternalID, gerr)
+		}
+		if len(state) == 0 {
+			return nil
+		}
+		return ctx.DeviceStatePublish(plugin.DeviceStateRequest{ExternalID: d.ExternalID, State: state, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	}
 	if method == "set_properties" || method == "get_properties" || method == "action" {
 		if list, ok := params.([]map[string]any); ok {
 			rows, e := miioBatchProperties(ctx, *d, token, method, list)
@@ -183,29 +239,298 @@ func commandPowerIntent(action string) (bool, bool) {
 	return false, false
 }
 
-// readTemperatureProperty 读本设备的温度属性（MIoT `siid=2, piid=2`）。
-//
-// 为什么写死 siid/piid：`chuangmi.plug.m3` / `chuangmi.plug.m1` 这类插座的规格里，
-// 开关服务（siid=2）的 piid=1 是 on、piid=2 就是 temperature —— 已用本地缓存的
-// spec 文件核对过（spec-cache/PmT_7JG8lWBmvjZ4.json）。没有温度传感器的型号
-// 会返回错误，这里吞掉并返回 ok=false：**温度是可选增强，不能影响开关命令**。
-func readTemperatureProperty(ctx *plugin.Context, d miioDevice, token []byte) (float64, bool) {
-	rows, err := miioBatchProperties(ctx, d, token, "get_properties",
-		[]map[string]any{{"did": d.ExternalID, "siid": 2, "piid": 2}})
+/*
+ * 老 miio 协议支持（2026-11-16，用户给的参考实现 hass-xiaomi-miot 定案）。
+ *
+ * # 为什么必须支持它
+ *
+ * 这台 `chuangmi.plug.m3` 在参考项目里是**老 miio 协议**设备：
+ *
+ *	'chuangmi.plug.m3': 'chuangmi.plug.m1'   → extend_model chuangmi.plug.hmi205
+ *	'miio_specs': {
+ *	    'prop.2.1': {'prop': 'power', 'setter': True},   # 用 set_power
+ *	    'prop.2.2': {'prop': 'temperature'},            # 用 get_prop "temperature"
+ *	}
+ *
+ * 也就是说：它的"功率/温度"是**老协议的字符串属性名**，要走
+ * `get_prop ["power","temperature"]` 与 `set_power ["on"/"off"]`，
+ * 而不是 MIoT 的 `get_properties(siid/piid)` —— 后者在它身上只会返回
+ * `code:-30001 Resp invalid json`（实测）或莫名其妙的值。
+ *
+ * # 顺带修掉一个更严重的问题
+ *
+ * 之前上报的开关状态来自**命令意图**（turn_on ⇒ power=true），而不是设备回读。
+ * 设备若没真的动作，界面照样显示成功 —— 用户报的"点了没反应但看着像成功"
+ * 正是这么来的。老协议路径下我们改从 `get_prop` **回读**，状态才是设备真值。
+ *
+ * # 探测与缓存
+ *
+ * 一个设备属于哪种协议，由设备自己回答：先试 `get_prop ["power"]`，
+ * 拿到数组即老协议；结果按 externalID 缓存到 FS（`miio-protocol.json`），只探一次。
+ */
+const miioProtocolPath = "miio-protocol.json"
+
+// loadLegacyDevices 读"老协议设备"缓存（缺失/损坏当空，会重探一次）。
+func loadLegacyDevices(ctx *plugin.Context) map[string]bool {
+	out := map[string]bool{}
+	r, err := ctx.FSRead(miioProtocolPath)
+	if err != nil || !r.Found {
+		return out
+	}
+	b, derr := r.Data()
+	if derr != nil {
+		return out
+	}
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+func saveLegacyDevices(ctx *plugin.Context, m map[string]bool) {
+	b, err := json.Marshal(m)
 	if err != nil {
-		// ⚠ 必须留原因：温度是**可选**属性，读不到不该拖累命令，
-		// 但"读不到却一声不响"会让排查变成猜（本仓反复踩过的坑）。
-		// 2026-11-16 实测就是靠它定位"为什么卡片上没有温度"。
-		ctx.LogWarn("hx-mi 温度读取失败（设备 %s）：%v", d.ExternalID, err)
+		return
+	}
+	w := plugin.FSWriteRequest{Path: miioProtocolPath, QuotaKB: 256}
+	w.SetData(b)
+	if err := ctx.FSWrite(w); err != nil {
+		ctx.LogWarn("hx-mi 协议缓存写入失败（不影响控制）：%v", err)
+	}
+}
+
+// legacyGetProp 用老协议读若干属性，返回按名字对齐的值。
+//
+// 老协议返回 `{"result":[...]}`，顺序与请求一致（这是 miio 的老约定）。
+func legacyGetProp(ctx *plugin.Context, d miioDevice, token []byte, names []string) (map[string]any, error) {
+	env, err := miioExchange(ctx, d, token, "get_prop", names)
+	if err != nil {
+		return nil, err
+	}
+	list, ok := env["result"].([]any)
+	if !ok {
+		return nil, errors.New("get_prop 返回不是数组")
+	}
+	out := map[string]any{}
+	for i, n := range names {
+		if i < len(list) {
+			out[n] = list[i]
+		}
+	}
+	return out, nil
+}
+
+// isLegacyDevice 判断该设备是否走老 miio 协议（结果缓存）。
+func isLegacyDevice(ctx *plugin.Context, d miioDevice, token []byte) bool {
+	cache := loadLegacyDevices(ctx)
+	if v, ok := cache[d.ExternalID]; ok {
+		return v
+	}
+	_, err := legacyGetProp(ctx, d, token, []string{"power"})
+	legacy := err == nil
+	cache[d.ExternalID] = legacy
+	saveLegacyDevices(ctx, cache)
+	if legacy {
+		ctx.LogWarn("hx-mi 该设备走老 miio 协议（device=%s model=%s）：用 get_prop/set_power", d.ExternalID, d.Model)
+	}
+	return legacy
+}
+
+// legacyPowerValue 把老协议的 on/off 值翻成布尔。
+func legacyPowerValue(v any) (bool, bool) {
+	switch t := v.(type) {
+	case string:
+		return strings.EqualFold(strings.TrimSpace(t), "on"), true
+	case bool:
+		return t, true
+	}
+	return false, false
+}
+
+// legacyNumber 把老协议返回的温度（可能是字符串/数字）转成浮点。
+func legacyNumber(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+/*
+ * 温度属性绑定（2026-11-16 用户选 A 方案：**属性枚举探测**）。
+ *
+ * # 为什么不能写死 siid/piid
+ *
+ * 之前的假设是「插座类设备开关服务 siid=2 的 piid=2 就是 temperature」——
+ * 那是从**缓存的 MIoT 规格**读来的。实测这台 chuangmi.plug.m3 对
+ * `siid=2,piid=2` 返回的是 `true`（布尔），即**规格与该固件不一致**：
+ *
+ *	plugin: hx-mi 温度值类型异常（设备 237970870 value=true）
+ *
+ * 型号表/规格表都会与实机漂移，所以改成**问设备本身**：小范围枚举
+ * (siid 2..4) × (piid 1..3)，挑出「返回数值且在合理温区」的那个属性。
+ *
+ * # 三条自律
+ *
+ *  1. **只探一次**：结果按设备 externalID 缓存在插件 FS（`temperature-bindings.json`），
+ *     重启后仍然有效。否则每条命令多 9 次属性读，LAN 上就是噪音。
+ *  2. **绝不影响命令**：探测失败只是"这台没有温度"，开关已经切过去了，
+ *     不能因为温度读不到就让用户以为没开成。
+ *  3. **判据要能解释**：挑中的属性连同依据一起记 Warn 日志
+ *     （设备、siid、piid、值），排查时不用再猜。
+ */
+type tempBinding struct {
+	SIID int `json:"siid"`
+	PIID int `json:"piid"`
+}
+
+// temperaturePlausible 判断一个读数是否像温度（摄氏度）。
+//
+// 范围取得宽：-40~80℃ 覆盖家用场景（含冷冻柜与阳台暴晒），
+// 又不至于把开关/亮度/功率这类整数属性误认成温度。
+const (
+	tempProbeSiidMin = 2
+	tempProbeSiidMax = 4
+	tempProbePiidMin = 1
+	tempProbePiidMax = 3
+)
+
+const tempBindingsPath = "temperature-bindings.json"
+
+// loadTempBindings 读缓存（缺失/损坏都当空，探测会重来一次）。
+func loadTempBindings(ctx *plugin.Context) map[string]tempBinding {
+	out := map[string]tempBinding{}
+	r, err := ctx.FSRead(tempBindingsPath)
+	if err != nil || !r.Found {
+		return out
+	}
+	b, derr := r.Data()
+	if derr != nil {
+		return out
+	}
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+// saveTempBindings 落盘。失败只 Warn：缓存丢了最多下次再探一遍。
+func saveTempBindings(ctx *plugin.Context, m map[string]tempBinding) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	w := plugin.FSWriteRequest{Path: tempBindingsPath, QuotaKB: 256}
+	w.SetData(b)
+	if err := ctx.FSWrite(w); err != nil {
+		ctx.LogWarn("hx-mi 温度绑定缓存写入失败（不影响控制）：%v", err)
+	}
+}
+
+// resolveTemperatureBinding 取该设备的温度属性：缓存优先，没有就探一次。
+func resolveTemperatureBinding(ctx *plugin.Context, d miioDevice, token []byte) (tempBinding, bool) {
+	cache := loadTempBindings(ctx)
+	if b, ok := cache[d.ExternalID]; ok && b.SIID > 0 && b.PIID > 0 {
+		return b, true
+	}
+	b, ok := probeTemperatureBinding(ctx, d, token)
+	if !ok {
+		return tempBinding{}, false
+	}
+	cache[d.ExternalID] = b
+	saveTempBindings(ctx, cache)
+	return b, true
+}
+
+// probeTemperatureBinding 枚举一小片属性，挑出像温度的那个。
+//
+// 一次 get_properties 打包 9 个 (siid,piid) —— miioBatchProperties 内部按 15 个
+// 一包，所以这里只发一包，代价可控。
+func probeTemperatureBinding(ctx *plugin.Context, d miioDevice, token []byte) (tempBinding, bool) {
+	var params []map[string]any
+	for siid := tempProbeSiidMin; siid <= tempProbeSiidMax; siid++ {
+		for piid := tempProbePiidMin; piid <= tempProbePiidMax; piid++ {
+			params = append(params, map[string]any{"did": d.ExternalID, "siid": siid, "piid": piid})
+		}
+	}
+	/*
+	 * ⚠ **逐个读，不要整包发**（2026-11-16 实测）。
+	 *
+	 * 先按"一次 get_properties 打包 9 个属性"实现，这台 chuangmi.plug.m3 直接回
+	 * `code:-30001 Resp invalid json` —— 它不支持一次问这么多属性（廉价的 miio
+	 * 固件很常见：单属性可读，批量就吐坏响应）。而整包失败会把"能读到的那个"
+	 * 一起丢掉，于是永远探不出来。
+	 *
+	 * 改成逐个探测：
+	 *  · 单属性读是这设备**已经证明支持**的路径（开关命令就是 set_properties 单项）；
+	 *  · 某个 siid/piid 不支持时只跳过它自己，不影响其它候选；
+	 *  · 探测只在**首次**进行（结果按设备缓存），9 次读不会变成常态开销。
+	 *
+	 * 参考实现 hass-xiaomi-miot 也是这个取向：按规格逐项取、单项失败不连坐整批。
+	 */
+	rows := make([]map[string]any, 0, len(params))
+	for _, one := range params {
+		got, err := miioBatchProperties(ctx, d, token, "get_properties", []map[string]any{one})
+		if err != nil {
+			// 单个属性读不到是常态（这台设备就不支持这个 siid/piid），
+			// 不记 Warn 以免刷屏；整轮都失败才在下面统一说明。
+			continue
+		}
+		rows = append(rows, got...)
+	}
+	if len(rows) == 0 {
+		ctx.LogWarn("hx-mi 温度属性探测无任何响应（设备 %s model=%s，已逐项枚举 siid %d-%d × piid %d-%d）",
+			d.ExternalID, d.Model, tempProbeSiidMin, tempProbeSiidMax, tempProbePiidMin, tempProbePiidMax)
+		return tempBinding{}, false
+	}
+	for _, row := range rows {
+		if code, ok := row["code"].(float64); ok && int(code) != 0 {
+			continue // 该属性这台设备不支持
+		}
+		// 只认**数值**：布尔（开关）与字符串（型号/固件）一律跳过。
+		v, isNum := row["value"].(float64)
+		if !isNum {
+			continue
+		}
+		if v < -40 || v > 80 {
+			continue
+		}
+		siid, _ := row["siid"].(float64)
+		piid, _ := row["piid"].(float64)
+		if siid <= 0 || piid <= 0 {
+			continue
+		}
+		b := tempBinding{SIID: int(siid), PIID: int(piid)}
+		ctx.LogWarn("hx-mi 温度属性已定位（设备 %s model=%s）：siid=%d piid=%d 当前值=%v",
+			d.ExternalID, d.Model, b.SIID, b.PIID, v)
+		return b, true
+	}
+	ctx.LogWarn("hx-mi 该设备没有可用的温度属性（设备 %s model=%s，已枚举 siid %d-%d × piid %d-%d）",
+		d.ExternalID, d.Model, tempProbeSiidMin, tempProbeSiidMax, tempProbePiidMin, tempProbePiidMax)
+	return tempBinding{}, false
+}
+
+// readTemperatureProperty 读该设备的温度值（属性位置由探测决定）。
+func readTemperatureProperty(ctx *plugin.Context, d miioDevice, token []byte) (float64, bool) {
+	b, ok := resolveTemperatureBinding(ctx, d, token)
+	if !ok {
+		return 0, false
+	}
+	rows, err := miioBatchProperties(ctx, d, token, "get_properties",
+		[]map[string]any{{"did": d.ExternalID, "siid": b.SIID, "piid": b.PIID}})
+	if err != nil {
+		ctx.LogWarn("hx-mi 温度读取失败（设备 %s siid=%d piid=%d）：%v", d.ExternalID, b.SIID, b.PIID, err)
 		return 0, false
 	}
 	row := firstRow(rows)
 	if row == nil {
-		ctx.LogWarn("hx-mi 温度读取返回空（设备 %s model=%s）", d.ExternalID, d.Model)
+		ctx.LogWarn("hx-mi 温度读取返回空（设备 %s）", d.ExternalID)
 		return 0, false
 	}
 	if code, ok := row["code"].(float64); ok && int(code) != 0 {
-		ctx.LogWarn("hx-mi 温度读取被设备拒绝（设备 %s code=%d siid=2 piid=2）", d.ExternalID, int(code))
+		ctx.LogWarn("hx-mi 温度读取被设备拒绝（设备 %s code=%d siid=%d piid=%d）",
+			d.ExternalID, int(code), b.SIID, b.PIID)
 		return 0, false
 	}
 	switch v := row["value"].(type) {
