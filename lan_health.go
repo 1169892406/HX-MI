@@ -521,9 +521,107 @@ func shortErr(err error) string {
 func cloudIRProbeTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
 	var in struct {
 		ExternalID string `json:"external_id"`
+		Action     string `json:"action"`
 	}
 	if len(args) > 0 {
 		_ = json.Unmarshal(args, &in)
+	}
+	/*
+	 * action="device_raw"：**原样 dump 云端设备列表里红外设备的全部字段**。
+	 *
+	 * 2026-11-17 用户指出："不是从我账号从云端下载遥控数据吗？我账号上是小米电视的
+	 * 遥控数据，已经配对好可以用的呀。" —— 对，用户已在米家配好遥控器，
+	 * 云端应有"这台遥控器用了哪个品牌/型号"的信息。与其猜品牌，不如把云端
+	 * 真实字段挖出来看它到底给了什么（键名一个都不能漏）。
+	 */
+	/*
+	 * action="remote_keys"：调小米**云端遥控器接口**取已配对遥控器的按键表
+	 * （2026-11-17 用户："不是从我账号从云端下载遥控数据吗？"）。
+	 *
+	 * 接口路径来自 mihome-ctl 的实现（`/v2/irdevice/controller/...`），
+	 * 与我此前猜的 `/app/ir/...` 完全不同 —— 难怪一直 404：
+	 *   · /v2/irdevice/controller/info     遥控器信息（controller_id / brand_id）
+	 *   · /v2/irdevice/controller/keys     按键列表（key_id，可能含原始码 code）
+	 *   · /v2/irdevice/controller/key/click  发送按键（云端经音箱代发）
+	 *
+	 * 请求体形状是 `{"data":"<json 字符串>"}`（不是 `{"params":...}`）。
+	 */
+	if in.Action == "remote_keys" {
+		sessionID, ssecurity, deviceID, serr := openCloudSession(ctx)
+		if serr != nil {
+			return json.Marshal(map[string]any{"error": "无云会话：" + serr.Error()})
+		}
+		defer func() { _ = ctx.HTTPClose(sessionID) }()
+		did := in.ExternalID
+		if did == "" {
+			// 从登记表找第一台 miir 设备的 did
+			if ds, derr := loadDeviceRegistry(ctx); derr == nil {
+				for _, d := range ds {
+					if strings.HasPrefix(d.Model, "miir.") {
+						did = d.ExternalID
+						break
+					}
+				}
+			}
+		}
+		if did == "" {
+			return json.Marshal(map[string]any{"error": "没有找到 miir.* 红外遥控设备"})
+		}
+		callIR := func(path string) map[string]any {
+			inner, _ := json.Marshal(map[string]any{"did": did})
+			outer, _ := json.Marshal(map[string]any{"data": string(inner)})
+			raw, cerr := apiPostRC4GuestDevice(ctx, sessionID, ssecurity, deviceID,
+				"https://api.io.mi.com/app"+path, string(outer))
+			out := map[string]any{"path": path}
+			if cerr != nil {
+				out["error"] = shortErr(cerr)
+			} else {
+				var v any
+				if json.Unmarshal(raw, &v) == nil {
+					out["result"] = v
+				} else {
+					out["raw"] = string(raw)
+				}
+			}
+			return out
+		}
+		return json.Marshal(map[string]any{
+			"did":  did,
+			"info": callIR("/v2/irdevice/controller/info"),
+			"keys": callIR("/v2/irdevice/controller/keys"),
+		})
+	}
+
+	if in.Action == "device_raw" {
+		sessionID, ssecurity, deviceID, serr := openCloudSession(ctx)
+		if serr != nil {
+			return json.Marshal(map[string]any{"error": "无云会话：" + serr.Error()})
+		}
+		defer func() { _ = ctx.HTTPClose(sessionID) }()
+		body, berr := apiPostRC4GuestDevice(ctx, sessionID, ssecurity, deviceID,
+			"https://api.io.mi.com/app/home/device_list",
+			`{"getVirtualModel":true,"getHuamiDevices":1,"get_split_device":false,"limit":200}`)
+		if berr != nil {
+			return json.Marshal(map[string]any{"error": berr.Error()})
+		}
+		var parsed struct {
+			Result struct {
+				List []map[string]any `json:"list"`
+			} `json:"result"`
+		}
+		if json.Unmarshal(body, &parsed) != nil {
+			return json.Marshal(map[string]any{"error": "设备列表解析失败"})
+		}
+		out := []map[string]any{}
+		for _, d := range parsed.Result.List {
+			did := fmt.Sprint(d["did"])
+			model := fmt.Sprint(d["model"])
+			if strings.HasPrefix(did, "ir.") || strings.Contains(strings.ToLower(model), "miir") ||
+				in.ExternalID != "" && did == in.ExternalID {
+				out = append(out, d)
+			}
+		}
+		return json.Marshal(map[string]any{"ir_devices": out, "count": len(out)})
 	}
 	ds, err := loadDeviceRegistry(ctx)
 	if err != nil {

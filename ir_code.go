@@ -280,7 +280,32 @@ func irDeviceTypes(ctx *plugin.Context) ([]map[string]any, error) {
 }
 
 // irBrands 拉某设备类型下的品牌（用中文名匹配用户输入）。
+//
+// 带落盘缓存：电视品牌有 503 条，每次发射都重新拉一次会白吃掉几秒预算
+// （2026-11-17：这也是把 30s 时限耗尽的帮凶之一）。
 func irBrands(ctx *plugin.Context, deviceID int) ([]map[string]any, error) {
+	key := "ir-brands-" + strconv.Itoa(deviceID) + ".json"
+	if r, err := ctx.FSRead(key); err == nil && r.Found {
+		if b, berr := r.Data(); berr == nil {
+			var cached []map[string]any
+			if json.Unmarshal(b, &cached) == nil && len(cached) > 0 {
+				return cached, nil
+			}
+		}
+	}
+	out, ferr := irBrandsFetch(ctx, deviceID)
+	if ferr != nil {
+		return nil, ferr
+	}
+	if b, merr := json.Marshal(out); merr == nil {
+		w := plugin.FSWriteRequest{Path: key, QuotaKB: 512}
+		w.SetData(b)
+		_ = ctx.FSWrite(w)
+	}
+	return out, nil
+}
+
+func irBrandsFetch(ctx *plugin.Context, deviceID int) ([]map[string]any, error) {
 	body, err := irDBCall(ctx, "/controller/brand/list/1", [][2]string{
 		{"devid", strconv.Itoa(deviceID)},
 	})
@@ -317,15 +342,33 @@ func irBrands(ctx *plugin.Context, deviceID int) ([]map[string]any, error) {
  * 不做批量、不做定时），且失败要如实报错而不是当作"已发送"。
  */
 func playIRLocal(ctx *plugin.Context, blaster miioDevice, token []byte, p irPattern) error {
-	env, err := miioExchange(ctx, blaster, token, "miIO.ir_play", map[string]any{
+	/*
+	 * ⚠ **红外是单向发射，设备通常不回应答**（2026-11-17 实测踩坑）。
+	 *
+	 * 第一版按普通命令处理（默认重试 3 次），结果 `miIO.ir_play` 每次都要等满
+	 * 超时，3 次 × 3s 叠加前面的两次 HTTP 取码，直接撞满插件 30s 时限 ⇒
+	 * `PLUGIN_SANDBOX_CRASH`。
+	 *
+	 * 正确语义：
+	 *   · 只试 **1 次**；
+	 *   · "UDP 等待响应超时"**视为已发射**（很多固件就是不发应答）；
+	 *   · 只有设备**明确回错误码**才算失败。
+	 */
+	env, err := miioExchangeWith(ctx, blaster, token, "miIO.ir_play", map[string]any{
 		"freq": p.Frequency,
 		"code": irEncodeForPlay(p),
-	})
+	}, miioExchangeOptions{Attempts: 1})
 	if err != nil {
+		if strings.Contains(err.Error(), "等待响应超时") || strings.Contains(err.Error(), "读取响应失败") {
+			// 无应答 ≠ 失败：红外发射本来就是"发完就算"。
+			ctx.LogWarn("hx-mi 红外已发出（设备未回执，属正常）：%s freq=%d %d 段",
+				blaster.Name, p.Frequency, len(p.Timings))
+			return nil
+		}
 		return err
 	}
 	if code, ok := env["code"].(float64); ok && int(code) != 0 {
-		return fmt.Errorf("音箱拒绝发射（code=%d，可能是波形格式不被接受）", int(code))
+		return fmt.Errorf("音箱拒绝发射（code=%d，波形格式可能不被接受）", int(code))
 	}
 	return nil
 }
