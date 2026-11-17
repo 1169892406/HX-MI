@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -253,7 +254,41 @@ func step1Ssecurity(ctx *plugin.Context, hostSessionID, deviceID string) (ssecur
 	if err != nil {
 		return "", "", "", err
 	}
+	/*
+	 * ★★★ 2026-11-17（用户「你看一下参考项目怎么做的」）：**必须检查 code**。
+	 *
+	 * 参考实现 `_login_step1` 就是这么做的：
+	 *	auth = account_get('/pass/serviceLogin', params={'sid':..,'_json':'true'})
+	 *	if auth.get('code') == 0:      ← 只有 code==0 才采用 ssecurity / passToken
+	 *
+	 * 而本函数原来不检查：passToken 失效时小米仍会在 body 里带回 ssecurity
+	 * （游客值）与一个 `ticket=0&pwd=0` 的 sts 地址 —— 于是刷新看起来"成功"，
+	 * 换到的却是无效票据，重试继续 SERVICETOKEN_EXPIRED。
+	 * 实测日志：`ssec长度=24 passToken=true loc前缀=https://sts.api.io.mi.com/sts?...ticket=0&pwd=0`
+	 *
+	 * 现在 code != 0 直接报错，让上层明确知道"passToken 已失效、必须重新登录"，
+	 * 而不是反复打"已自动刷新并重试"这种假成功日志。
+	 */
+	if code, ok := authValueToInt(auth.Code); ok && code != 0 {
+		return "", "", "", fmt.Errorf("serviceLogin 拒绝（code=%d %s）：passToken 已失效，需重新登录",
+			code, firstNonEmptyStr(auth.Description, auth.Desc))
+	}
 	return auth.Ssecurity, auth.PassToken, auth.Location, nil
+}
+
+// authValueToInt 把 `Code any` 转成整数（小米有时给数字、有时给字符串）。
+func authValueToInt(v any) (int, bool) {
+	switch t := v.(type) {
+	case float64:
+		return int(t), true
+	case int:
+		return t, true
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(t)); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
 }
 
 // refreshPairedMaterial 取“配对的”会话材料：step1 拿 (ssecurity, location)，

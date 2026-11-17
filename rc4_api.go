@@ -160,10 +160,13 @@ func refreshCloudTokens(ctx *plugin.Context, sessionID, deviceID string) (string
 	 *  ② GET location 让宿主 CookieJar 收下**与该 ssecurity 配对的新 serviceToken**；
 	 *  ③ 新 ssecurity 落回保险库。
 	 */
-	ssec, _, loc, err := step1Ssecurity(ctx, sessionID, deviceID)
+	ssec, pt2, loc, err := step1Ssecurity(ctx, sessionID, deviceID)
 	if err != nil {
 		return "", fmt.Errorf("step1 失败：%w", err)
 	}
+	// 诊断：passToken 是否还在、location 指向哪、ssecurity 长度。
+	ctx.LogWarn("hx-mi step1 结果：ssec长度=%d passToken=%v loc前缀=%s",
+		len(ssec), pt2 != "", clipForLog(loc, 90))
 	if ssec == "" {
 		return "", errors.New("step1 未返回 ssecurity（passToken 可能已失效）")
 	}
