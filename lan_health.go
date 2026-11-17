@@ -145,6 +145,9 @@ func consumeSyncPending() bool {
 // lanProbePending 标记"宿主 tick 提示该探测了"（同样为避免 tick 内做重活）。
 var lanProbePending atomic.Bool
 
+// lanProbeRunning 是"探测进行中"互斥标志：抢不到就跳过本轮（不堆叠）。
+var lanProbeRunning atomic.Bool
+
 
 // consumePendingAutoSync 在只读工具调用时顺带执行一次待处理的自动同步。
 //
@@ -189,6 +192,22 @@ func consumePendingAutoSync(ctx *plugin.Context) {
 // 会把宿主调度循环卡住（main.go 的注释已经踩过这个坑）。所以：tick 只置位，
 // 在**下一次工具调用**里做 —— 此刻我们持有该 wasm 实例锁，可以安全地发 host_call。
 func consumePendingLanProbe(ctx *plugin.Context) {
+	/*
+	 * ⚠ **不堆叠**（2026-11-17 用户明确要求："上次超时不能堆叠检测"）。
+	 *
+	 * 这里用 CAS 抢"正在探测"标志：抢不到说明上一轮还没结束（设备超时中），
+	 * **本轮直接跳过**。否则超时设备会让 tick 越积越多，最终把插件拖垮
+	 * （历史事故：8 台 × 3s 累计撞满 30s 时限，沙箱被打死）。
+	 *
+	 * 与 `lanProbePending` 的区别：
+	 *   · lanProbePending  = 「宿主 tick 提示该探了」（可被覆盖，无妨）
+	 *   · lanProbeRunning  = 「此刻真的在探」（必须互斥）
+	 */
+	if !lanProbeRunning.CompareAndSwap(false, true) {
+		return // 上一轮仍在进行 → 跳过本轮，不堆叠
+	}
+	defer lanProbeRunning.Store(false)
+
 	if !lanProbePending.CompareAndSwap(true, false) {
 		return
 	}

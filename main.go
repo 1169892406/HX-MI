@@ -33,7 +33,22 @@ type config struct {
 	 * 所以默认关闭；关闭时立即删除已保存的密码。
 	 */
 	SavePassword bool `json:"save_password,omitempty"`
-	// HealthCheckIntervalSec 是局域网健康检查（在线探测）间隔，默认 300 秒。
+	/*
+	 * LanPriority 是命令优先通道（2026-11-17 用户要求二选一）：
+	 *   "lan"   —— 局域网优先（默认），失败回退云端
+	 *   "cloud" —— 云端优先，失败回退局域网
+	 * 语义是"优先"而非"只用"：另一条可用时仍会回退，避免单通道故障导致完全不可控。
+	 */
+	LanPriority string `json:"lan_priority,omitempty"`
+	/*
+	 * LanCheckIntervalSec 是局域网健康检查间隔（默认 5 秒）。
+	 *
+	 * 注意：健康检查**默认开启且没有开关**（用户明确要求），只有间隔可配。
+	 * 这个探测是 UDP hello 包，无副作用；单台超时 3 秒，且**不堆叠**
+	 * （上次未返回则跳过本轮，见 lan_health.go）。
+	 */
+	LanCheckIntervalSec int `json:"lan_check_interval_seconds,omitempty"`
+	// HealthCheckIntervalSec 是旧字段名，保留只读兼容（已由 LanCheckIntervalSec 取代）。
 	HealthCheckIntervalSec int `json:"healthcheck_interval_seconds,omitempty"`
 }
 
@@ -65,12 +80,24 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 	if next.SyncIntervalSec < 60 || next.SyncIntervalSec > 86400 {
 		return errors.New("sync_interval_seconds 必须在 60 到 86400 之间")
 	}
-	if next.HealthCheckIntervalSec == 0 {
-		next.HealthCheckIntervalSec = 300
+	// 通道优先：默认 lan；非法值直接报错（静默改默认会让人以为设置生效了）
+	if next.LanPriority == "" {
+		next.LanPriority = "lan"
 	}
-	if next.HealthCheckIntervalSec < 30 || next.HealthCheckIntervalSec > 3600 {
-		return errors.New("healthcheck_interval_seconds 必须在 30 到 3600 之间")
+	if next.LanPriority != "lan" && next.LanPriority != "cloud" {
+		return errors.New("lan_priority 只能是 lan 或 cloud")
 	}
+	// 健康检查间隔：新字段优先，旧字段兼容；默认 5 秒，范围 5~3600
+	if next.LanCheckIntervalSec == 0 {
+		next.LanCheckIntervalSec = next.HealthCheckIntervalSec
+	}
+	if next.LanCheckIntervalSec == 0 {
+		next.LanCheckIntervalSec = 5
+	}
+	if next.LanCheckIntervalSec < 5 || next.LanCheckIntervalSec > 3600 {
+		return errors.New("lan_check_interval_seconds 必须在 5 到 3600 之间")
+	}
+	next.HealthCheckIntervalSec = next.LanCheckIntervalSec
 	// 关闭保存密码 ⇒ 立即清除历史密码（不给"关了还留着"留后门）。
 	if !next.SavePassword {
 		_, _ = ctx.VaultBlobDelete(autoReloginCredKey)
@@ -81,8 +108,8 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 		}
 	}
 	current = next
-	ctx.LogWarn("hx-mi 配置已应用：健康检查=%ds 同步=%ds 保存密码=%v",
-		current.HealthCheckIntervalSec, current.SyncIntervalSec, current.SavePassword)
+	ctx.LogWarn("hx-mi 配置已应用：健康检查=%ds 同步=%ds 保存密码=%v 通道优先=%s",
+		current.LanCheckIntervalSec, current.SyncIntervalSec, current.SavePassword, current.LanPriority)
 	// 旧数据迁移是**可选能力**，失败不得阻断插件启用（2026-11-09 修正）。
 	//
 	// # 为什么改
@@ -158,7 +185,7 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 	// 用户明确要求高频探测，本地探不到就立即标离线，不等云端账号同步。
 	// 间隔由配置决定（2026-11-17 用户要求「增加一个健康检查，可以配置间隔时间」）。
 	// 配 0/缺省沿用默认 5 分钟；范围在 configure 里已校验为 30~3600 秒。
-	hcInterval := time.Duration(current.HealthCheckIntervalSec) * time.Second
+	hcInterval := time.Duration(current.LanCheckIntervalSec) * time.Second
 	if hcInterval <= 0 {
 		hcInterval = lanHealthProbeInterval
 	}
@@ -432,6 +459,10 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		return irRawTool(ctx, args)
 	case "ir_send":
 		return irSendTool(ctx, args)
+	case "device_info":
+		return deviceInfoTool(ctx, args)
+	case "health_list":
+		return healthListTool(ctx)
 	case "cred_check":
 		return credCheckTool(ctx)
 	case "ir_probe":
