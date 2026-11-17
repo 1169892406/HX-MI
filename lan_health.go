@@ -434,33 +434,41 @@ func lanDiagnoseTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage
 				name   string
 				params any
 			}{
-				// 属性读取（已确认 get_prop 可用，用真实属性名 volume）
-				{"get_prop", []any{"volume"}},
-				// 播放器操作类（确认播放控制是否走本地）
-				{"player_play_operation", map[string]any{"action": "pause"}},
-				{"player_get_play_status", []any{}},
-				// 红外类：更多命名变体
-				{"miIO.ir_play_key", map[string]any{"key_id": "", "dev_key": ""}},
-				{"miIO.start_ir_play", map[string]any{"dev_key": "", "ir_code": "0000"}},
-				{"ir_play_key", map[string]any{"key_id": "", "dev_key": ""}},
-				{"miIO.irPlay", map[string]any{"dev_key": "", "ir_code": "0000"}},
+				/*
+				 * 只留 3 个最可能的红外方法名（2026-11-17：6 个方法 × 3s 会撞满
+				 * 插件 30s 时限，实测 PLUGIN_TIMEOUT）。其余候选确认过不支持，不再重复。
+				 *
+				 * 用**类型错误的参数**（字符串而不是对象）来区分两件事。
+				 *
+				 * 小米设备对「不认识的 method」**不响应**（UDP 超时），对「认识的
+				 * method + 坏参数」通常**回错误码**。所以：
+				 *   · 返回 error  → 方法**存在**（只是参数被我故意搞坏了）
+				 *   · 超时        → 方法**不存在**
+				 *
+				 * 这样不用真实红外码也能判定，且**绝不会真的发射**（参数根本不是码）。
+				 */
+				/*
+				 * `miIO.ir_play` **已确认存在**（回 code:-10000 而不是超时）。
+				 * 现在探它的**参数结构**：不同残缺组合如果回不同错误，
+				 * 就能反推出它要哪些字段。残缺参数不会被当成有效码发射。
+				 */
+				{"miIO.ir_play", []any{}},
+				{"miIO.ir_play", map[string]any{}},
+				{"miIO.ir_play", map[string]any{"ir_code": "probe"}},
+				{"miIO.ir_play", map[string]any{"dev_key": "probe", "ir_code": "probe"}},
+				{"miIO.ir_play", map[string]any{"key_id": "probe"}},
+				{"miIO.ir_play", map[string]any{"dev_key": "probe", "key_id": "probe"}},
 			}
 			for _, m := range candidates {
 				_, e := miioExchangeWith(ctx, d, token, m.name, m.params,
 					miioExchangeOptions{Attempts: 1})
 				label := m.name
-				if len(r.Methods) > 0 {
-					// 同名方法只记一次（get_prop 试了两种参数）
-					dup := false
-					for _, x := range r.Methods {
-						if strings.HasPrefix(x, label+"(") {
-							dup = true
-							break
-						}
+				if b, err2 := json.Marshal(m.params); err2 == nil {
+					sd := string(b)
+					if len(sd) > 44 {
+						sd = sd[:44] + "…"
 					}
-					if dup {
-						continue
-					}
+					label = m.name + " " + sd
 				}
 				switch {
 				case e == nil:
