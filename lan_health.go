@@ -375,8 +375,14 @@ func lanDiagnoseTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage
 		ds = filtered
 	} else if in.Limit > 0 && len(ds) > in.Limit {
 		ds = ds[:in.Limit]
-	} else if len(ds) > 2 {
-		ds = ds[:2]
+	} else if len(ds) > 1 {
+		/*
+		 * 默认只测 **1 台**（2026-11-17 实测：2 台 × 多方法 × 3s = 10.3s，
+		 * 直接把插件时间预算耗尽，随后整个沙箱被判死、其它工具全部 SANDBOX_CRASH）。
+		 *
+		 * 诊断是**人工排查**用的，一次看一台足够；要看别的就传 name/external_id。
+		 */
+		ds = ds[:1]
 	}
 	type probeResult struct {
 		Name      string   `json:"name"`
