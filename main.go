@@ -21,6 +21,20 @@ type config struct {
 	PollingEnabled *bool `json:"polling_enabled,omitempty"`
 	// DeviceFilterModels 非空时只同步 model 前缀匹配的设备（空 = 全部）。
 	DeviceFilterModels []string `json:"device_filter_models,omitempty"`
+	/*
+	 * SavePassword 是否保存账号密码用于**自动重登**（默认关闭）。
+	 *
+	 * 小米 serviceToken 约 11 小时失效，而插件无法用 passToken 自行续期
+	 * （换票的 Set-Cookie 被宿主 HTTP 客户端吞掉，见 9482377 事故）。
+	 * 打开本项后，票据过期时会用保存的密码重走一次完整登录 —— 这是唯一
+	 * 可靠的自愈方式，参考实现（hass-xiaomi-miot）也是这么做的。
+	 *
+	 * ⚠ 安全取舍：密码进保险库（宿主持有密钥），但**等于把账号托付给插件**。
+	 * 所以默认关闭；关闭时立即删除已保存的密码。
+	 */
+	SavePassword bool `json:"save_password,omitempty"`
+	// HealthCheckIntervalSec 是局域网健康检查（在线探测）间隔，默认 300 秒。
+	HealthCheckIntervalSec int `json:"healthcheck_interval_seconds,omitempty"`
 }
 
 var current = config{Region: "cn", SyncIntervalSec: 300}
@@ -51,12 +65,24 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 	if next.SyncIntervalSec < 60 || next.SyncIntervalSec > 86400 {
 		return errors.New("sync_interval_seconds 必须在 60 到 86400 之间")
 	}
+	if next.HealthCheckIntervalSec == 0 {
+		next.HealthCheckIntervalSec = 300
+	}
+	if next.HealthCheckIntervalSec < 30 || next.HealthCheckIntervalSec > 3600 {
+		return errors.New("healthcheck_interval_seconds 必须在 30 到 3600 之间")
+	}
+	// 关闭保存密码 ⇒ 立即清除历史密码（不给"关了还留着"留后门）。
+	if !next.SavePassword {
+		_, _ = ctx.VaultBlobDelete(autoReloginCredKey)
+	}
 	for _, f := range next.DeviceFilterModels {
 		if strings.TrimSpace(f) == "" {
 			return errors.New("device_filter_models 不能包含空字符串")
 		}
 	}
 	current = next
+	ctx.LogWarn("hx-mi 配置已应用：健康检查=%ds 同步=%ds 保存密码=%v",
+		current.HealthCheckIntervalSec, current.SyncIntervalSec, current.SavePassword)
 	// 旧数据迁移是**可选能力**，失败不得阻断插件启用（2026-11-09 修正）。
 	//
 	// # 为什么改
@@ -130,8 +156,14 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 	// 宿主 scheduler），插件自己不起 ticker，也不在 Boot 时阻塞网络。
 	// 局域网健康探测：30 秒一轮，只发 hello 包（无令牌、无副作用）。
 	// 用户明确要求高频探测，本地探不到就立即标离线，不等云端账号同步。
+	// 间隔由配置决定（2026-11-17 用户要求「增加一个健康检查，可以配置间隔时间」）。
+	// 配 0/缺省沿用默认 5 分钟；范围在 configure 里已校验为 30~3600 秒。
+	hcInterval := time.Duration(current.HealthCheckIntervalSec) * time.Second
+	if hcInterval <= 0 {
+		hcInterval = lanHealthProbeInterval
+	}
 	if err := ctx.BackgroundRegister(plugin.BackgroundRegisterRequest{
-		Name: "lan-health", IntervalMS: int(lanHealthProbeInterval / time.Millisecond), Immediate: true,
+		Name: "lan-health", IntervalMS: int(hcInterval / time.Millisecond), Immediate: true,
 	}); err != nil {
 		return err
 	}
@@ -373,6 +405,8 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		return buildAccountView(ctx)
 	case "settings":
 		return applySyncSettingsTool(ctx, args)
+	case "ir_probe":
+		return cloudIRProbeTool(ctx, args)
 	case "lan_diagnose":
 		return lanDiagnoseTool(ctx, args)
 	case "lan_health":

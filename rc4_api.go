@@ -127,10 +127,32 @@ func apiPostRC4GuestDevice(ctx *plugin.Context, sessionID, ssecurity, deviceID, 
 	 *   serviceToken，而我把新 ssecurity 写回了保险库 ⇒ **两者不配对**，
 	 *   原本还能用的会话被彻底废掉，之后所有云端调用都报 SERVICETOKEN_EXPIRED。
 	 *
-	 * 教训：**没有能力验证配对成功时，宁可不刷新**。刷新交给用户重新登录（可靠），
-	 * 过期前由 `cloudSessionUsable` 的 9 小时判据主动提醒。
+	 * 教训：**没有能力验证配对成功时，宁可不刷新**。
+	 *
+	 * ## 但用户要求「保存账号密码 + 开关」（2026-11-17）
+	 *
+	 * 有密码时情况不同：可以走**完整登录流程**（serviceLoginAuth2），
+	 * 那条路宿主 CookieJar 才会收下新的 serviceToken —— 与 step1 换票不是一回事。
+	 * 所以这里：票据过期 → 若配置开启且存了密码 → 完整重登一次 → 重试。
+	 * 没有密码就如实报错，由 9 小时判据提前提醒用户。
 	 */
-	return apiPostRC4GuestDeviceOnce(ctx, sessionID, ssecurity, deviceID, apiURL, data)
+	raw, err := apiPostRC4GuestDeviceOnce(ctx, sessionID, ssecurity, deviceID, apiURL, data)
+	if err == nil || !isServiceTokenExpired(err) {
+		return raw, err
+	}
+	if _, _, ok := loadSavedPassword(ctx); !ok {
+		return raw, err // 未开启保存密码：不尝试，如实上报
+	}
+	if rerr := tryAutoRelogin(ctx); rerr != nil {
+		ctx.LogWarn("hx-mi 自动重登失败：%v", rerr)
+		return raw, err
+	}
+	// 重登后会话材料已更新：用新的 ssecurity 重试一次。
+	_, newSSec, _, oerr := openCloudSession(ctx)
+	if oerr != nil || newSSec == "" {
+		return raw, err
+	}
+	return apiPostRC4GuestDeviceOnce(ctx, sessionID, newSSec, deviceID, apiURL, data)
 }
 
 // isServiceTokenExpired 判断错误是否是"服务票据过期"（需要刷新/重登）。

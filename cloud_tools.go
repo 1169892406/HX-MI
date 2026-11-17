@@ -62,6 +62,13 @@ func startLogin(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, err
 	if strings.TrimSpace(in.User) == "" || in.Password == "" {
 		return nil, errors.New("账号和密码不能为空")
 	}
+	/*
+	 * 保存密码用于自动重登（2026-11-17 用户要求，默认关闭）。
+	 *
+	 * 放在最前面：即使本次登录还要走验证码，只要用户开了开关、密码也拿到了，
+	 * 就先存下来 —— 否则"登录需要验证码"这类流程会漏存。
+	 */
+	savePasswordIfEnabled(ctx, in.User, in.Password)
 	// 先回收历史会话再开新会话：宿主上限 4，反复登录时旧会话不清就会撞上限。
 	// keepID 传空：此刻新会话还没建立，因此回收所有已完成/多余挑战会话；
 	// 保留下来的那个挑战会话由下面的 canReuse 逻辑决定是否复用。
