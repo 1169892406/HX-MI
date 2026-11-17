@@ -233,3 +233,50 @@ func maskAccount(account string) string {
 	}
 	return account
 }
+
+// credCheckTool 是**只读自检**工具（`cred_check`）：验证账号密码保险库键的读写权限，
+// 不涉及任何真实凭据（写入的是占位串，读回后立刻删除）。
+//
+// # 为什么需要（2026-11-17）
+//
+// 用户开启了 save_password 并登录，日志却报 `PLUGIN_PERMISSION_DENIED: secret blob` ——
+// 因为 manifest 里漏声明了 `account_password`。这种"代码对、声明错"的失败
+// 只有到用户真正登录才会暴露，体验很差。
+// 有了这个自检，能在让用户登录**之前**就确认链路通不通。
+func credCheckTool(ctx *plugin.Context) (json.RawMessage, error) {
+	const probe = `{"user":"__probe__","password":"__probe__"}`
+	out := map[string]any{}
+
+	info, err := ctx.VaultBlobSeal(autoReloginCredKey, []byte(probe))
+	if err != nil {
+		out["seal_ok"] = false
+		out["seal_error"] = err.Error()
+		return json.Marshal(out)
+	}
+	out["seal_ok"] = true
+	out["version"] = info.Version
+
+	blob, _, oerr := ctx.VaultBlobOpen(autoReloginCredKey)
+	if oerr != nil {
+		out["open_ok"] = false
+		out["open_error"] = oerr.Error()
+	} else {
+		out["open_ok"] = string(blob) == probe
+	}
+	if _, derr := ctx.VaultBlobDelete(autoReloginCredKey); derr != nil {
+		out["delete_ok"] = false
+		out["delete_error"] = derr.Error()
+	} else {
+		out["delete_ok"] = true
+	}
+	// 读回确认已删除，避免占位串残留影响真实保存
+	if b, _, e2 := ctx.VaultBlobOpen(autoReloginCredKey); e2 == nil && len(b) > 0 {
+		out["residual"] = true
+	}
+	out["save_password_enabled"] = current.SavePassword
+	out["verdict"] = "保险库读写链路正常，下次登录即可保存密码"
+	if !current.SavePassword {
+		out["verdict"] = "链路正常，但配置项 save_password 未开启 —— 打开后重新登录才会保存"
+	}
+	return json.Marshal(out)
+}
