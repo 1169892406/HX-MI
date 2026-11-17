@@ -348,8 +348,8 @@
       var ver = d.version ? d.version : '-';
       var detail = d.path_detail || d.path || '';
       html += '<tr>' +
-        '<td><div class="hname">' + esc(d.name) + '</div>' +
-        (detail ? '<div class="hsub">' + esc(detail) + '</div>' : '') + '</td>' +
+        '<td><span class="hname">' + esc(d.name) + '</span>' +
+        (detail ? '<span class="hsub">' + esc(detail) + '</span>' : '') + '</td>' +
         '<td><span class="hver">' + esc(d.model) + '</span></td>' +
         '<td><span class="hver">' + esc(ver) + '</span></td>' +
         '<td><span class="hst hst--' + cls + '">' + esc(status) + '</span></td>' +
@@ -383,6 +383,24 @@
     return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
+  }
+
+  /** onEl 安全绑定：元素不存在时静默跳过（区块被移除后仍有对应代码）。 */
+  function onEl(id, evt, fn) {
+    var node = el(id);
+    if (node) node.addEventListener(evt, fn);
+  }
+
+  /** _setText 安全写文本（元素不存在时跳过）。 */
+  function _setText(id, text) {
+    var node = el(id);
+    if (node) node.textContent = text;
+  }
+
+  /** _setDisabled 安全设禁用态。 */
+  function _setDisabled(id, on) {
+    var node = el(id);
+    if (node) node.disabled = on;
   }
 
   function showBanner(text, kind) {
@@ -436,7 +454,10 @@
   function renderConfig() {
     el('f-region').value = config.region || 'cn';
     var f = config.device_filter_models;
-    el('f-filter').value = Array.isArray(f) ? f.join(', ') : '';
+    // f-filter 所在卡片已移除（2026-11-17）；有则填、无则跳过
+    if (el('f-filter')) {
+      el('f-filter').value = Array.isArray(f) ? f.join(', ') : '';
+    }
     // 自动续 token（2026-11-17）：默认开启；用它驱动风险提示与同步开关的可用性
     var savePw = config.save_password !== false;
     el('f-save-password').checked = savePw;
@@ -519,10 +540,11 @@
     var eff = effectiveCadence();
     out.sync_interval_seconds = eff.seconds;
     out.polling_enabled = eff.enabled;
-    out.device_filter_models = el('f-filter').value
-      .split(',')
-      .map(function (s) { return s.trim(); })
-      .filter(function (s) { return s !== ''; });
+    // 过滤输入框已移除：保持原配置（避免一次保存把它清空）
+    out.device_filter_models = el('f-filter')
+      ? el('f-filter').value.split(',').map(function (s) { return s.trim(); })
+          .filter(function (s) { return s !== ''; })
+      : (config.device_filter_models || []);
     // 自动续 token / 通道优先 / 离线检查间隔（2026-11-17）
     out.save_password = !!el('f-save-password').checked;
     var picked = document.querySelector('input[name="lan-priority"]:checked');
@@ -1485,38 +1507,38 @@
   function loadCatalogStatus() {
     rpc('plugin.tool.call', { tool: 'catalog_status', args: {} })
       .then(function (r) {
-        el('catalog-out').textContent = failed(r)
+        _setText('catalog-out', failed(r)
           ? '读取失败：' + failText(r)
-          : JSON.stringify(r, null, 2);
+          : JSON.stringify(r, null, 2));
         scheduleHeight();
       })
-      .catch(function (e) { el('catalog-out').textContent = '读取失败：' + errText(e); scheduleHeight(); });
+      .catch(function (e) { _setText('catalog-out', '读取失败：' + errText(e)); scheduleHeight(); });
   }
 
   function refreshCatalog() {
-    el('btn-catalog-refresh').disabled = true;
+    _setDisabled('btn-catalog-refresh', true);
     rpc('plugin.tool.call', { tool: 'catalog_refresh', args: {} })
       .then(function (r) {
-        el('catalog-out').textContent = failed(r)
+        _setText('catalog-out', failed(r)
           ? '刷新失败：' + failText(r)
-          : '刷新完成：' + JSON.stringify(r, null, 2);
+          : '刷新完成：' + JSON.stringify(r, null, 2));
         scheduleHeight();
       })
-      .catch(function (e) { el('catalog-out').textContent = '刷新失败：' + errText(e); scheduleHeight(); })
-      .then(function () { el('btn-catalog-refresh').disabled = false; });
+      .catch(function (e) { _setText('catalog-out', '刷新失败：' + errText(e)); scheduleHeight(); })
+      .then(function () { _setDisabled('btn-catalog-refresh', false); });
   }
 
   function runLanHealth() {
-    el('btn-lan-health').disabled = true;
+    _setDisabled('btn-lan-health', true);
     rpc('plugin.tool.call', { tool: 'lan_health', args: {} })
       .then(function (r) {
-        el('lan-out').textContent = failed(r)
+        _setText('lan-out', failed(r)
           ? '探测失败：' + failText(r)
-          : JSON.stringify(r, null, 2);
+          : JSON.stringify(r, null, 2));
         scheduleHeight();
       })
-      .catch(function (e) { el('lan-out').textContent = '探测失败：' + errText(e); scheduleHeight(); })
-      .then(function () { el('btn-lan-health').disabled = false; });
+      .catch(function (e) { _setText('lan-out', '探测失败：' + errText(e)); scheduleHeight(); })
+      .then(function () { _setDisabled('btn-lan-health', false); });
   }
 
   /**
@@ -1558,17 +1580,17 @@
         return rpc('plugin.tool.call', { tool: 'accounts', args: {} })
           .then(function (acc) {
             lines.push('账号数：' + (((acc && acc.accounts) || []).length));
-            el('diag').textContent = lines.join('\n\n');
+            _setText('diag', lines.join('\n\n'));
             scheduleHeight();
           })
           .catch(function (e) {
             lines.push('账号读取失败：' + errText(e));
-            el('diag').textContent = lines.join('\n\n');
+            _setText('diag', lines.join('\n\n'));
             scheduleHeight();
           });
       })
       .catch(function (e) {
-        el('diag').textContent = '读取失败：' + errText(e);
+        _setText('diag', '读取失败：' + errText(e));
         scheduleHeight();
       });
   }
@@ -1619,7 +1641,17 @@
         markDirty(true);
       });
     }
-    el('btn-diag').addEventListener('click', loadDiag);
+    /*
+     * 「设备目录 / 局域网探测 / 诊断」三个区块已按用户要求从界面移除
+     * （2026-11-17），对应按钮不复存在。统一改用 onEl() 安全绑定：
+     * 元素不存在就跳过 —— 否则 `el(...).addEventListener` 抛
+     * `Cannot read properties of null`，会中断 bind() 后续**所有**绑定，
+     * 连带健康检查按钮、自动续 token 开关也失效。
+     *
+     * 后端能力（catalog_refresh / lan_health / status）仍在 manifest 里，
+     * 只是不再从界面暴露。
+     */
+    onEl('btn-diag', 'click', loadDiag);
     el('btn-add-sync').addEventListener('click', function () {
       // 已展开时再点＝收起（同一个按钮两种状态，不需要额外的取消入口）。
       var f = el('addsync-form');
@@ -1631,9 +1663,9 @@
       scheduleHeight();
     });
     el('btn-add-sync-ok').addEventListener('click', submitAddSync);
-    el('btn-catalog-status').addEventListener('click', loadCatalogStatus);
-    el('btn-catalog-refresh').addEventListener('click', refreshCatalog);
-    el('btn-lan-health').addEventListener('click', runLanHealth);
+    onEl('btn-catalog-status', 'click', loadCatalogStatus);
+    onEl('btn-catalog-refresh', 'click', refreshCatalog);
+    onEl('btn-lan-health', 'click', runLanHealth);
     // 「退出登录」已移进账号行（每行一个），绑定在 renderAccounts 里 —— 卡头不再有该按钮。
     el('sw-polling').addEventListener('click', function () { setPolling(!pollingOn()); });
   }

@@ -226,62 +226,9 @@
       <div id="res-devices"></div>
     </div>
 
-    <div class="card">
-      <label style="display:flex;flex-direction:column;gap:6px">
-        <span class="muted small">设备型号过滤（逗号分隔，留空 = 全部）</span>
-        <input type="text" id="f-filter" placeholder="如 lumi.acpartner, zhimi.airpurifier">
-      </label>
-    </div>
   </section>
 
-  <!-- ── ③ 设备目录 ────────────────────────────────────────-->
-  <section class="sec">
-    <div class="sec__hd"><span class="dot"></span><h2>设备目录</h2></div>
-    <p class="sec__d">决定能识别哪些米家型号；不刷新会漏新设备。</p>
-    <div class="card">
-      <div class="mini">
-        <div class="t"><b>型号索引</b><span id="catalog-out">尚未读取</span></div>
-        <button type="button" id="btn-catalog-status" class="btn btn--sm">查看</button>
-        <button type="button" id="btn-catalog-refresh" class="btn btn--sm btn--primary">刷新目录</button>
-      </div>
-    </div>
-  </section>
-
-  <!-- ── ④ 局域网探测 ──────────────────────────────────────-->
-  <section class="sec">
-    <div class="sec__hd"><span class="dot"></span><h2>局域网探测</h2></div>
-    <p class="sec__d">不必登录也能发现并控制同一网段的设备。</p>
-    <div class="card">
-      <div class="mini">
-        <div class="t"><b>局域网设备</b><span id="lan-out">尚未探测</span></div>
-        <button type="button" id="btn-lan-health" class="btn btn--sm">立即探测</button>
-      </div>
-    </div>
-  </section>
-
-  <!-- ── ⑤ 诊断 ────────────────────────────────────────────-->
-  <section class="sec">
-    <div class="sec__hd"><span class="dot"></span><h2>诊断</h2></div>
-    <p class="sec__d">排障用：原样读一份当前状态（配置、账号数、会话代次）。</p>
-    <div class="card">
-      <div class="mini">
-        <div class="t"><b>状态快照</b><span>含配置与会话信息，排查时贴给开发者</span></div>
-        <button type="button" id="btn-diag" class="btn btn--sm">读取</button>
-      </div>
-      <pre id="diag" hidden></pre>
-    </div>
-  </section>
-</div>
-
-<!-- ⚠ 这一行不能少（2026-11-10 踩过）：
-     重写 index.html 时漏掉它，页面会"看起来正常"（HTML/CSS 都在、也没有报错），
-     但**脚本从没运行** —— 表现是账号列表永远停在「读取中…」、返回按钮点不动、
-     同步区全空，而且控制台一条错误都没有（没有脚本，自然没有报错）。
-     闸门 check-ui-handshake.mjs 已加断言钉住"index.html 必须引用 app.js"。 -->
-<script src="app.js"></script>
-</body>
-</html>
-  <!-- ── ④ 健康检查（2026-11-17 新增）────────────────────-->
+<!-- ── ④ 健康检查（2026-11-17 新增）────────────────────-->
   <section class="sec">
     <div class="sec__hd"><span class="dot"></span><h2>健康检查</h2><span class="tag-new">新增</span></div>
     <p class="sec__d">按设备实际通信路径分别检测：局域网直连 / 网关读取 / 云端下发。单台超时 3 秒，上次未返回则跳过本次（不堆叠）。</p>
@@ -296,4 +243,13 @@
       <div id="health-table"><p class="muted small">读取中…</p></div>
     </div>
   </section>
+</div>
 
+<!-- ⚠ 这一行不能少（2026-11-10 踩过）：
+     重写 index.html 时漏掉它，页面会"看起来正常"（HTML/CSS 都在、也没有报错），
+     但**脚本从没运行** —— 表现是账号列表永远停在「读取中…」、返回按钮点不动、
+     同步区全空，而且控制台一条错误都没有（没有脚本，自然没有报错）。
+     闸门 check-ui-handshake.mjs 已加断言钉住"index.html 必须引用 app.js"。 -->
+<script src="app.js"></script>
+</body>
+</html>

@@ -332,17 +332,19 @@ pre {
 .tag-new{font-size:11px;font-weight:600;color:#0369a1;background:#e0f2fe;border:1px solid #bae6fd;border-radius:6px;padding:2px 7px;margin-left:8px}
 
 /* ── 健康检查表 ───────────────────────────────────────────── */
-.htable{width:100%;border-collapse:collapse;font-size:12.5px}
-.htable th{text-align:left;font-size:11.5px;font-weight:600;color:#8b95a5;padding:0 10px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
-.htable td{padding:10px;border-bottom:1px solid #f5f7fa;vertical-align:middle}
+/* 健康检查表（2026-11-17 紧凑化：用户反馈"UI 太大"）
+   行高 10px→5px、字号 12.5→11.5、副标题并入同一行，整体高度约减半。 */
+.htable{width:100%;border-collapse:collapse;font-size:11.5px;line-height:1.35}
+.htable th{text-align:left;font-size:11px;font-weight:600;color:#8b95a5;padding:0 8px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.htable td{padding:5px 8px;border-bottom:1px solid #f5f7fa;vertical-align:middle}
 .htable tr:last-child td{border-bottom:0}
-.htable .hname{font-weight:600;color:var(--fg)}
-.htable .hsub{font-size:11px;color:#9aa3af;margin-top:2px}
-.htable .hver{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:#4b5563}
+.htable .hname{font-weight:600;color:var(--fg);font-size:11.5px}
+.htable .hsub{display:inline;font-size:10.5px;color:#9aa3af;margin-left:7px;font-weight:400}
+.htable .hver{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:#6b7280}
 .hpath{font-size:11.5px;color:#6b7280}
-.hlat{font-size:11.5px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
+.hlat{font-size:10.5px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
 .hlat--ok{color:#15803d}.hlat--bad{color:#b91c1c}.hlat--na{color:#9aa3af}
-.hst{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;border-radius:99px;padding:3px 9px;white-space:nowrap}
+.hst{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:600;border-radius:99px;padding:2px 7px;white-space:nowrap}
 .hst::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
 .hst--on{color:#15803d;background:#ecfdf5;border:1px solid #bbf7d0}
 .hst--off{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca}
