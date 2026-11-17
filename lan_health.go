@@ -58,7 +58,9 @@ func probeLanDevice(ctx *plugin.Context, d miioDevice) lanHealthEntry {
 	resp, err := ctx.UDPSend(plugin.UDPSendRequest{
 		Host: d.Host, Port: 54321,
 		PayloadB64: base64.StdEncoding.EncodeToString(helloPacket),
-		TimeoutMS:  2000,
+		// 3 秒（2026-11-17 用户明确要求）。原来 2000ms，与界面/文档写的 3s 不一致 ——
+		// 用户看到「3s 超时」而实际 2s 就判死，属于文案与行为不符。
+		TimeoutMS:  3000,
 	})
 	latency := time.Since(start).Milliseconds()
 	if err != nil {

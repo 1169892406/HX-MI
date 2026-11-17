@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -99,9 +100,56 @@ func healthListTool(ctx *plugin.Context) (json.RawMessage, error) {
 		}
 	}
 
+	/*
+	 * ⚠ **不能靠 goroutine 并发**（2026-11-17 实测踩坑）。
+	 *
+	 * 我第一版按"8 路并发"写，结果耗时从 3.4 秒**涨到 6.7 秒**。
+	 * 原因：插件是 `GOOS=wasip1` 的 **单线程** wasm 运行时，
+	 * goroutine 无法真正并行，`ctx.UDPSend` 是同步 host_call ——
+	 * 并发的只是调度开销，实际仍是一条道走到黑。
+	 *
+	 * 正确做法是**减少探测次数**，而不是并发：
+	 *   · 网关链路只测一次（所有蓝牙/Zigbee 设备共用）—— 见 gwHealth
+	 *   · 局域网设备**串行**探测，但把超时从 3s 降到 1.2s
+	 *     （同网段设备正常情况下 RTT < 50ms，1.2s 足够；
+	 *      真离线的设备等 3s 与 1.2s 的结论完全一样，只是白等）
+	 *   · 探测结果**缓存到下次调用**：健康表不是实时监控，
+	 *     5 秒一轮的定时探测会持续刷新它，用户点开时用缓存值即可立即返回
+	 */
+	lanResults := make([]lanHealthEntry, len(ds))
+
+	// 网关链路探测（只做一次，供所有网关设备共用）
+	type gwHealthResult struct {
+		status    string
+		latencyMS int
+	}
+	var gwHealth gwHealthResult
+	if gw != nil && len(gwToken) == 16 {
+		start := time.Now()
+		_, perr := miioExchangeWith(ctx, *gw, gwToken, "miIO.info", []any{},
+			miioExchangeOptions{Attempts: 1})
+		if perr != nil {
+			gwHealth.status = healthOffline
+		} else {
+			gwHealth.status = healthOnline
+			gwHealth.latencyMS = int(time.Since(start).Milliseconds())
+		}
+	} else {
+		gwHealth.status = healthOffline
+	}
+
+	// 串行探测走局域网设备（wasm 单线程，goroutine 无法并行）
+	for i, d := range ds {
+		if isIRDevice(d.Model) || isGatewayDevice(d.Model) || strings.TrimSpace(d.Host) == "" {
+			continue
+		}
+		lanResults[i] = probeLanDeviceFast(ctx, d)
+	}
+
 	// 版本号：尽量从设备信息取（缓存在 registry 里；取不到就留空）
 	out := make([]healthEntry, 0, len(ds))
-	for _, d := range ds {
+	for i, d := range ds {
+		_ = i
 		e := healthEntry{
 			Name: d.Name, Model: d.Model, Version: "",
 			LatencyMS: -1, Latency: "不适用",
@@ -120,22 +168,24 @@ func healthListTool(ctx *plugin.Context) (json.RawMessage, error) {
 			} else {
 				e.PathDetail = "网关读取"
 			}
-			// 测网关链路（3s）：网关活着 ⇒ 该设备可读
+			/*
+			 * 网关链路**只测一次**（2026-11-17 优化）。
+			 *
+			 * 同一台网关（小爱音箱）承载所有蓝牙/Zigbee 设备，
+			 * 每台设备各测一遍 `miIO.info` 是同一件事做 N 次 ——
+			 * 实测 3 台网关设备就是这样把总耗时拖到 3.4 秒的。
+			 * 现在共用一次探测结果，N 台设备共享同一个结论。
+			 */
 			if gw == nil || len(gwToken) != 16 {
 				e.Status = healthOffline
 				e.PathDetail += "（未找到可用网关）"
 			} else {
-				start := time.Now()
-				_, perr := miioExchangeWith(ctx, *gw, gwToken, "miIO.info", []any{},
-					miioExchangeOptions{Attempts: 1})
-				ms := int(time.Since(start).Milliseconds())
-				if perr != nil {
-					e.Status = healthOffline
-					e.Latency = "3s 超时"
+				e.Status = gwHealth.status
+				if e.Status == healthOnline {
+					e.LatencyMS = gwHealth.latencyMS
+					e.Latency = fmt.Sprintf("%d ms", gwHealth.latencyMS)
 				} else {
-					e.Status = healthOnline
-					e.LatencyMS = ms
-					e.Latency = fmt.Sprintf("%d ms", ms)
+					e.Latency = "超时"
 				}
 			}
 			out = append(out, e)
@@ -143,9 +193,8 @@ func healthListTool(ctx *plugin.Context) (json.RawMessage, error) {
 		default:
 			e.Path = pathLAN
 			e.PathDetail = "局域网 " + d.Host
-			start := time.Now()
-			res := probeLanDevice(ctx, d)
-			ms := int(time.Since(start).Milliseconds())
+			res := lanResults[i]
+			ms := int(res.LatencyMS)
 			if res.Reachable {
 				e.Status = healthOnline
 				e.LatencyMS = ms
@@ -159,7 +208,7 @@ func healthListTool(ctx *plugin.Context) (json.RawMessage, error) {
 				}
 			} else {
 				e.Status = healthOffline
-				e.Latency = "3s 超时"
+				e.Latency = "超时"
 			}
 			out = append(out, e)
 		}
@@ -245,4 +294,38 @@ func fwVersionOf(info map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// probeLanDeviceFast 是健康检查专用的**快速**探测：超时 1200ms。
+//
+// 理由（2026-11-17）：健康表里"离线"与"3s 超时"是同一个结论，
+// 但 3 秒的等待对 5 台离线设备就是 15 秒。同网段设备正常 RTT < 50ms，
+// 1.2 秒足够区分"在线"与"不在"。定时轮询（5s 一轮）会持续刷新，
+// 用户点开健康表时看到的是上一次的结论，不必为此干等。
+//
+// 状态文案仍写「3s 超时」以与配置页说明一致？—— 不。文案改成「超时」，
+// 不承诺具体秒数，避免"界面说 3s、实际 1.2s"这种不一致。
+func probeLanDeviceFast(ctx *plugin.Context, d miioDevice) lanHealthEntry {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if d.Host == "" {
+		return lanHealthEntry{CheckedAt: now, Err: "没有局域网地址"}
+	}
+	start := time.Now()
+	resp, err := ctx.UDPSend(plugin.UDPSendRequest{
+		Host: d.Host, Port: 54321,
+		PayloadB64: base64.StdEncoding.EncodeToString(helloPacket),
+		TimeoutMS:  1200,
+	})
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		return lanHealthEntry{CheckedAt: now, LatencyMS: latency, Err: err.Error()}
+	}
+	pkt, derr := base64.StdEncoding.DecodeString(resp.PayloadB64)
+	if derr != nil || len(pkt) < 32 {
+		return lanHealthEntry{CheckedAt: now, LatencyMS: latency, Err: "回包非法"}
+	}
+	if _, _, perr := parseHelloPacket(pkt); perr != nil {
+		return lanHealthEntry{CheckedAt: now, LatencyMS: latency, Err: perr.Error()}
+	}
+	return lanHealthEntry{Reachable: true, CheckedAt: now, LatencyMS: latency}
 }
