@@ -164,10 +164,14 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 	 * 此刻持有实例锁，可以安全发 host_call。探测结果会**更新设备可用性**并
 	 * 用本地登记表重新宣布，因此"设备在不在局域网"不再依赖云端。
 	 *
-	 * 对**所有**工具都消费（包括 sync_now/accounts）：这不是改凭据的活，
-	 * 而且用户打开配置页时最需要看到最新的在线状态。
+	 * 但**不挂在凭据类工具上**：login/verify/logout 是用户当下最要紧的操作，
+	 * 万一探测慢（设备不通时单台仍要 3s），不该让"登录"陪着等。2026-11-17
+	 * 就是因为探测挂在登录路径上，用户点登录直接吃到沙箱崩溃报错。
 	 */
-	consumePendingLanProbe(ctx)
+	if tool != "login" && tool != "verify" && tool != "verify_web" &&
+		tool != "logout" && tool != "captcha" && tool != "captcha_image" {
+		consumePendingLanProbe(ctx)
+	}
 	switch tool {
 	case "regions":
 		return json.Marshal(map[string]any{"regions": []map[string]any{{"id": "cn", "name": "中国大陆", "enabled": true}}})

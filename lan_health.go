@@ -192,7 +192,66 @@ func consumePendingLanProbe(ctx *plugin.Context) {
 	if !lanProbePending.CompareAndSwap(true, false) {
 		return
 	}
-	announceLocalDevices(ctx, probeAllLanDevices(ctx))
+	/*
+	 * ⚠ **必须限流**（2026-11-17 实测事故）。
+	 *
+	 * 第一版这里直接调 `probeAllLanDevices` 探**全部**设备：每台发 UDP hello 并等最多
+	 * 3s，家里 8 台里有 4 台不通 ⇒ 累计 12s+，再把工具自己的耗时叠上去就撞
+	 * 插件 30s 执行时限 ⇒ 沙箱被打死（`PLUGIN_SANDBOX_CRASH`），用户连「读取账号」
+	 * 都失败（因为登录工具也会经过这里）。
+	 *
+	 * 所以：
+	 *  ① **每次只探一台**（轮转，落盘记住 index），一次最多 3s，任何工具都不会被拖垮；
+	 *  ② 探完一台就宣布**那一台**的可用性，其余设备沿用上次结果；
+	 *  ③ 5 分钟一轮 tick ⇒ 一小时内能把家里设备轮一遍，够用。
+	 */
+	ds, err := loadDeviceRegistry(ctx)
+	if err != nil || len(ds) == 0 {
+		return
+	}
+	idx := loadLanProbeCursor(ctx) % len(ds)
+	d := ds[idx]
+	saveLanProbeCursor(ctx, (idx+1)%len(ds))
+
+	res := map[string]lanHealthEntry{}
+	if strings.TrimSpace(d.Host) != "" {
+		res[d.ExternalID] = probeLanDevice(ctx, d)
+		lanHealthTable.mu.Lock()
+		lanHealthTable.results[d.ExternalID] = res[d.ExternalID]
+		lanHealthTable.mu.Unlock()
+	}
+	announceLocalDevices(ctx, res)
+}
+
+// lanProbeCursorPath 记住"下一台该探谁"，让轮转跨调用/重启都连续。
+const lanProbeCursorPath = "lan-probe-cursor.json"
+
+func loadLanProbeCursor(ctx *plugin.Context) int {
+	r, err := ctx.FSRead(lanProbeCursorPath)
+	if err != nil || !r.Found {
+		return 0
+	}
+	b, berr := r.Data()
+	if berr != nil {
+		return 0
+	}
+	var v struct {
+		Index int `json:"index"`
+	}
+	if json.Unmarshal(b, &v) != nil || v.Index < 0 {
+		return 0
+	}
+	return v.Index
+}
+
+func saveLanProbeCursor(ctx *plugin.Context, idx int) {
+	b, err := json.Marshal(map[string]int{"index": idx})
+	if err != nil {
+		return
+	}
+	w := plugin.FSWriteRequest{Path: lanProbeCursorPath, QuotaKB: 8}
+	w.SetData(b)
+	_ = ctx.FSWrite(w)
 }
 
 // announceLocalDevices 用**本地登记表**（devices.json）宣布设备，不依赖云会话。
