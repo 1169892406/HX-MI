@@ -259,7 +259,24 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 				}
 			}
 		}
-		return json.Marshal(map[string]any{"accounts": items, "account_names": full})
+		/*
+		 * 保存密码的状态提示（2026-11-17）。
+		 *
+		 * 放在**顶层**而不是每个 account 里：它是插件级配置（save_password），
+		 * 不是某个账号的属性。前端/用户最需要知道的一句话是
+		 * 「开关开了但还没存到凭据 → 请重新登录一次」——
+		 * 否则会误以为功能没生效（这正是本轮实测踩到的）。
+		 */
+		credSaved := passwordSavedFlag(ctx)
+		note := ""
+		if current.SavePassword && !credSaved {
+			note = "已开启「保存账号密码」，但还没有保存到凭据 —— 请重新登录一次以保存（之后票据过期会自动重登）。"
+		}
+		return json.Marshal(map[string]any{
+			"accounts": items, "account_names": full,
+			"password_saved": credSaved, "save_password_enabled": current.SavePassword,
+			"notice": note,
+		})
 	case "account_settings":
 		var in struct {
 			AccountID       string  `json:"account_id"`

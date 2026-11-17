@@ -148,6 +148,13 @@ func recordSyncFailure(ctx *plugin.Context, cause error) {
 //
 // sync.enabled / running / next_sync_at 现算（读设置与状态文件即可）；
 // 其余字段来自上一次同步落盘的快照（sync-state.json），因为没有一件能现推。
+
+// passwordSavedFlag 报告是否真的存有可用于自动重登的密码（不含任何凭据内容）。
+func passwordSavedFlag(ctx *plugin.Context) bool {
+	_, _, ok := loadSavedPassword(ctx)
+	return ok
+}
+
 func buildAccountView(ctx *plugin.Context) (json.RawMessage, error) {
 	state, err := restoreCloudSession(ctx)
 	if err != nil {
@@ -158,9 +165,24 @@ func buildAccountView(ctx *plugin.Context) (json.RawMessage, error) {
 	settings, _ := loadSyncSettings(ctx)
 
 	// 账号身份：从已保存的会话材料里取（脱敏后展示）。
+	/*
+	 * 提示「还需登录一次才能保存密码」（2026-11-17）。
+	 *
+	 * 背景：用户开启 save_password 开关时，密码只有在**登录那一刻**才拿得到。
+	 * 如果开关是在登录之后打开的（或首次因权限声明缺失而保存失败），
+	 * 界面上会看到「开关已开但没有生效」，很容易误以为功能坏了。
+	 */
+	credHint := ""
+	if current.SavePassword {
+		if _, _, ok := loadSavedPassword(ctx); !ok {
+			credHint = "已开启「保存账号密码」，但还没有保存到凭据 —— 请重新登录一次以保存（之后票据过期会自动重登）。"
+		}
+	}
 	out := map[string]any{
 		"state":           state,
 		"relogin_required": state == "auth_rejected",
+		"password_saved":  passwordSavedFlag(ctx),
+		"notice":          credHint,
 		"device_count":    len(ds),
 	}
 	if id := loadAccountIdentity(ctx); id != nil {
