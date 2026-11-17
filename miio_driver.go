@@ -1211,6 +1211,43 @@ func cloudMediaCommand(ctx *plugin.Context, d miioDevice, cmd miioCommand) error
 	return fmt.Errorf("不支持的媒体动作 %q", cmd.Action)
 }
 
+/*
+ * lanMediaState 用**局域网老方法**读音箱音量/静音（2026-11-17 实测可行）。
+ *
+ * 探测结论（`lan_diagnose`，小爱音箱Pro lx06）：
+ *   `miIO.info`   ✅      `get_prop`     ✅（属性名要用 volume/mute）
+ *   `get_properties`（MIoT）✗   `player_play_operation` ✗
+ *   各种 `ir_play` 变体 ✗
+ *
+ * 所以**状态读取可以完全离线**（不依赖云会话），而播放控制仍只能云端。
+ * 这条优先于云端：云一过期，至少音量/静音还能看。
+ */
+func lanMediaState(ctx *plugin.Context, d miioDevice, token []byte) (map[string]any, error) {
+	env, err := miioExchange(ctx, d, token, "get_prop", []string{"volume", "mute"})
+	if err != nil {
+		return nil, err
+	}
+	list, ok := env["result"].([]any)
+	if !ok || len(list) == 0 {
+		return nil, errors.New("get_prop 返回不是数组")
+	}
+	mp := map[string]any{}
+	if v, ok := cloudNumber(list[0]); ok {
+		mp["volume_level"] = v / 100.0
+	}
+	if len(list) > 1 {
+		if s, ok := list[1].(string); ok {
+			mp["muted"] = strings.EqualFold(s, "on") || strings.EqualFold(s, "true")
+		} else if b, ok := list[1].(bool); ok {
+			mp["muted"] = b
+		}
+	}
+	if len(mp) == 0 {
+		return nil, errors.New("get_prop 没有可用读数")
+	}
+	return map[string]any{"media_player": mp}, nil
+}
+
 // cloudMediaState 经云端读音箱音量/静音/播放状态，组装成平台认的 media_player 键。
 func cloudMediaState(ctx *plugin.Context, d miioDevice) (map[string]any, error) {
 	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)

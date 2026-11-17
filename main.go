@@ -369,6 +369,8 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		return buildAccountView(ctx)
 	case "settings":
 		return applySyncSettingsTool(ctx, args)
+	case "lan_diagnose":
+		return lanDiagnoseTool(ctx, args)
 	case "lan_health":
 		return lanHealthTool(ctx)
 	case "catalog_status":

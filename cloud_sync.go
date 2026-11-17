@@ -328,7 +328,22 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 			}
 		}
 		if pollSensor && isMedia {
-			if st, serr := cloudMediaState(ctx, ds[index[external]]); serr != nil {
+			/*
+			 * 本地优先（2026-11-17）：音箱支持 `get_prop ["volume","mute"]`，
+			 * 这条不依赖云会话。云一过期，音量/静音至少还能看。
+			 */
+			var mst map[string]any
+			var mserr error
+			if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", external); terr == nil && len(tok) == 16 &&
+				strings.TrimSpace(c.LocalIP) != "" {
+				mst, mserr = lanMediaState(ctx, ds[index[external]], tok)
+			} else {
+				mserr = errors.New("无局域网 token/地址")
+			}
+			if mserr != nil {
+				mst, mserr = cloudMediaState(ctx, ds[index[external]])
+			}
+			if st, serr := mst, mserr; serr != nil {
 				ctx.LogWarn("hx-mi 媒体状态轮询失败（device=%s model=%s）：%v", external, c.Model, serr)
 			} else if len(st) > 0 {
 				if perr := ctx.DeviceStatePublish(plugin.DeviceStateRequest{

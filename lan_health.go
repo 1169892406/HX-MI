@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+	"fmt"
 	"encoding/base64"
 	"encoding/json"
 	"sync"
@@ -241,4 +243,190 @@ func announceLocalDevices(ctx *plugin.Context, availability map[string]lanHealth
 	if announced > 0 {
 		ctx.LogWarn("hx-mi 已用本地登记表宣布 %d 台设备（不依赖云会话）", announced)
 	}
+}
+
+// lanDiagnoseTool 是**只读**诊断工具（`lan_diagnose`）：判断一台局域网设备
+// 到能用哪种协议通信，**不执行任何改变物理世界的动作**。
+//
+// # 为什么需要它（2026-11-17）
+//
+// 用户说「遥控数据存储下来了，不能本地控制」——红外码在音箱里，平台却只能走
+// 云端。要判断"音箱能不能局域网发红外"，先得知道：
+//   · 它的局域网 miio **加密通道**通不通（hello 有响应不代表能解出包）；
+//   · 它认哪套协议：老 miio 方法（`miIO.info` / `get_prop`）还是 MIoT（`get_properties`）。
+//
+// 之前音箱 LAN 直连 30s 超时，我怀疑就是拿 MIoT 的 `get_properties` 去问一台
+// 只认老方法（或根本不开放该端口）的设备。所以这里**分别试**、逐个记录耗时与错误。
+//
+// # 安全边界
+//
+// 只调用**查询类**方法：`miIO.info`（设备信息）、`get_prop ["power"]`（读属性）。
+// 绝不发 `ir_play` / `set_*` / `action` 这类会产生实际动作的方法。
+func lanDiagnoseTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
+	/*
+	 * ⚠ 必须能**只测一台**（2026-11-17 实测）。
+	 *
+	 * 每台设备要串行试 4~5 个方法，单方法最坏 3s 超时 ⇒ 一台就可能 12~15s。
+	 * 全量 8 台会远超插件 30s 执行时限，实测直接把沙箱打死：
+	 *   `PLUGIN_SANDBOX_CRASH: module closed with context deadline exceeded`
+	 *
+	 * 所以支持 `{"name":"小爱音箱Pro"}` 或 `{"external_id":"266363830"}`
+	 * 只测指定设备；不传则只测**前 2 台**（够用于排查，也不至于超时）。
+	 */
+	var in struct {
+		Name       string `json:"name"`
+		ExternalID string `json:"external_id"`
+		Limit      int    `json:"limit"`
+	}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &in)
+	}
+	ds, err := loadDeviceRegistry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if in.Name != "" || in.ExternalID != "" {
+		filtered := ds[:0]
+		for _, d := range ds {
+			if (in.Name != "" && d.Name == in.Name) || (in.ExternalID != "" && d.ExternalID == in.ExternalID) {
+				filtered = append(filtered, d)
+			}
+		}
+		ds = filtered
+	} else if in.Limit > 0 && len(ds) > in.Limit {
+		ds = ds[:in.Limit]
+	} else if len(ds) > 2 {
+		ds = ds[:2]
+	}
+	type probeResult struct {
+		Name      string   `json:"name"`
+		Model     string   `json:"model"`
+		Host      string   `json:"host"`
+		TokenOK   bool     `json:"token_ok"`
+		Handshake string   `json:"handshake"`            // "ok" / 错误短句
+		Methods   []string `json:"methods,omitempty"`    // 老方法里成功的
+		MIoTOK    bool     `json:"miot_ok"`              // get_properties 是否可用
+		Errors    []string `json:"errors,omitempty"`
+	}
+	out := []probeResult{}
+	for _, d := range ds {
+		if strings.TrimSpace(d.Host) == "" {
+			continue
+		}
+		r := probeResult{Name: d.Name, Model: d.Model, Host: d.Host}
+		token, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID)
+		if terr != nil || len(token) != 16 {
+			r.TokenOK = false
+			r.Handshake = "无设备 token"
+			out = append(out, r)
+			continue
+		}
+		r.TokenOK = true
+
+		// ① 老方法 miIO.info：只返回设备信息，无副作用；也验证了加密通道。
+		start := time.Now()
+		if _, e := miioExchangeWith(ctx, d, token, "miIO.info", []any{},
+			miioExchangeOptions{Attempts: 1}); e != nil {
+			r.Handshake = "失败"
+			r.Errors = append(r.Errors, "miIO.info: "+shortErr(e))
+		} else {
+			r.Handshake = fmt.Sprintf("ok(%dms)", time.Since(start).Milliseconds())
+			r.Methods = append(r.Methods, "miIO.info")
+		}
+
+		// ② 老方法 get_prop ["power"]：读属性，无副作用。
+		if r.Handshake == "ok" || strings.HasPrefix(r.Handshake, "ok(") {
+			if _, e := miioExchangeWith(ctx, d, token, "get_prop", []string{"power"},
+				miioExchangeOptions{Attempts: 1}); e != nil {
+				r.Errors = append(r.Errors, "get_prop: "+shortErr(e))
+			} else {
+				r.Methods = append(r.Methods, "get_prop")
+			}
+			// ③ MIoT get_properties（siid/piid 查询，无副作用）。
+			if _, e := miioBatchProperties(ctx, d, token, "get_properties",
+				[]map[string]any{{"did": d.ExternalID, "siid": 2, "piid": 1}}); e != nil {
+				r.Errors = append(r.Errors, "get_properties: "+shortErr(e))
+			} else {
+				r.MIoTOK = true
+			}
+			/*
+			 * ④ 红外方法探测（2026-11-17）。
+			 *
+			 * 用户诉求：红外码存在音箱本地，能否**本地发射**（不依赖云）。
+			 * 先判断音箱认不认这些方法名 —— 用**明显无效的码**（`"0000"`），
+			 * 设备会因参数不合法而报错，而**不会真的发射**：
+			 *   · 返回 error → 方法存在（只是参数被拒）；
+			 *   · UDP 超时   → 方法名它根本不认。
+			 *
+			 * 只探名字，不探"怎么发"——真发要等用户确认（红外会改变物理世界）。
+			 */
+			/*
+			 * 逐个试候选方法，**超时也记下来**（2026-11-17 改进）。
+			 *
+			 * 小米设备对不认识的方法**不响应**（UDP 超时），而不是回错误码 ——
+			 * 所以"没出现"和"不存在"必须能区分开，否则看不出到底试过什么。
+			 *
+			 * 结果标记：
+			 *   `方法(ok)`           → 应答了
+			 *   `方法(err:...)`      → 应答了但报错（说明方法存在，参数/权限不对）
+			 *   `方法(timeout)`      → 不认这个方法
+			 */
+			candidates := []struct {
+				name   string
+				params any
+			}{
+				// 属性读取（已确认 get_prop 可用，用真实属性名 volume）
+				{"get_prop", []any{"volume"}},
+				// 播放器操作类（确认播放控制是否走本地）
+				{"player_play_operation", map[string]any{"action": "pause"}},
+				{"player_get_play_status", []any{}},
+				// 红外类：更多命名变体
+				{"miIO.ir_play_key", map[string]any{"key_id": "", "dev_key": ""}},
+				{"miIO.start_ir_play", map[string]any{"dev_key": "", "ir_code": "0000"}},
+				{"ir_play_key", map[string]any{"key_id": "", "dev_key": ""}},
+				{"miIO.irPlay", map[string]any{"dev_key": "", "ir_code": "0000"}},
+			}
+			for _, m := range candidates {
+				_, e := miioExchangeWith(ctx, d, token, m.name, m.params,
+					miioExchangeOptions{Attempts: 1})
+				label := m.name
+				if len(r.Methods) > 0 {
+					// 同名方法只记一次（get_prop 试了两种参数）
+					dup := false
+					for _, x := range r.Methods {
+						if strings.HasPrefix(x, label+"(") {
+							dup = true
+							break
+						}
+					}
+					if dup {
+						continue
+					}
+				}
+				switch {
+				case e == nil:
+					r.Methods = append(r.Methods, label+"(ok)")
+				case strings.Contains(e.Error(), "udp 等待响应超时") ||
+					strings.Contains(e.Error(), "读取响应失败"):
+					r.Methods = append(r.Methods, label+"(timeout)")
+				default:
+					r.Methods = append(r.Methods, label+"(err:"+shortErr(e)+")")
+				}
+			}
+		}
+		out = append(out, r)
+	}
+	return json.Marshal(map[string]any{"devices": out, "probed_at": time.Now().UTC().Format(time.RFC3339)})
+}
+
+// shortErr 截短错误信息（诊断输出用，避免把整段报文塞进界面）。
+func shortErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if len(msg) > 120 {
+		msg = msg[:120] + "…"
+	}
+	return msg
 }
