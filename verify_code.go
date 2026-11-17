@@ -39,6 +39,19 @@ func absorbLocation(ctx *plugin.Context, hostSessionID, _ string, loc string) er
 	if err != nil {
 		return err
 	}
+	/*
+	 * ⚠ 实测结论（2026-11-17，勿再重复调查）：
+	 *
+	 * 换票的 Set-Cookie 在**重定向的中间响应**里被宿主 HTTP 客户端消费，
+	 * 插件侧看不到 —— 这里 status=200、响应头只有
+	 * [Connection Content-Length Content-Type Date Request-Id Server]，**没有 Set-Cookie**。
+	 * 也就是说：本宿主环境下**无法由插件自己保存新 serviceToken**，
+	 * 只能依赖宿主 CookieJar 隐式更新；而实测刷新后重试仍报 SERVICETOKEN_EXPIRED，
+	 * 说明 jar 并没有拿到（或没用于）新票据。
+	 *
+	 * 因此"自动续期"这条路在当前宿主上走不通，改为**过期前主动预警**
+	 * （见 cloudSessionUsable 的 9 小时判据），让用户白天看到提示。
+	 */
 	if resp.Status == 401 || resp.Status == 403 {
 		return errors.New("落地地址拒绝了当前会话")
 	}

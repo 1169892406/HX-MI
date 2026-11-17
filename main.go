@@ -498,6 +498,22 @@ func cloudSessionUsable(ctx *plugin.Context) (bool, string) {
 	if st := loadSyncState(ctx); isServiceTokenExpiredString(st.LastError) {
 		return false, "服务票据已过期：" + st.LastError
 	}
+	/*
+	 * 过期**前**主动预警（2026-11-17）。
+	 *
+	 * 实测小米 serviceToken 约 **11 小时**失效（用户 11-16 23:16 登录，
+	 * 11-17 10:44 已全部云端调用被拒）。而插件无法自行续期：
+	 * 换票的 Set-Cookie 被宿主 HTTP 客户端在重定向中间消费，插件侧读不到，
+	 * jar 也没有因此更新（详见 absorbLocation 的注释）。
+	 *
+	 * 所以退而求其次：**在失效前就提醒用户**。取 9 小时（留 2 小时余量），
+	 * 让用户白天就能看到「登录已过期，请重新登录」，而不是半夜发现控制失效。
+	 */
+	if ts, terr := time.Parse(time.RFC3339, saved.SavedAt); terr == nil {
+		if age := time.Since(ts); age > 9*time.Hour {
+			return false, fmt.Sprintf("登录已超过 %.0f 小时（小米票据约 11 小时失效），请重新登录", age.Hours())
+		}
+	}
 	return true, ""
 }
 

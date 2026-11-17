@@ -145,13 +145,38 @@ func isServiceTokenExpired(err error) bool {
 // 复用登录流程里已验证过的 refreshPairedMaterial（step1 serviceLogin + sts location），
 // 它从 vault 读 passToken 自建 Cookie 头，**不依赖用户在场**。
 func refreshCloudTokens(ctx *plugin.Context, sessionID, deviceID string) (string, error) {
-	ssec, _, err := refreshPairedMaterial(ctx, sessionID, deviceID)
+	/*
+	 * ⚠ 不用 `refreshPairedMaterial`（2026-11-17 实测它是**假成功**）。
+	 *
+	 * 那个函数在 `loc == ""` 或 loc 不在可信范围时**静默跳过**换票，
+	 * 但仍返回非空 ssecurity —— 调用方会以为"刷新成功"，于是拿旧
+	 * serviceToken 重试，结果还是 SERVICETOKEN_EXPIRED。
+	 * 日志实证：
+	 *	服务票据已过期，已用 passToken 自动刷新并重试   ← 以为成功
+	 *	sync_now 失败：SERVICETOKEN_EXPIRED            ← 重试仍失败
+	 *
+	 * 这里走**严格三步**，任何一步没做到都明确报错，绝不假装成功：
+	 *  ① step1 serviceLogin 拿 ssecurity + location；
+	 *  ② GET location 让宿主 CookieJar 收下**与该 ssecurity 配对的新 serviceToken**；
+	 *  ③ 新 ssecurity 落回保险库。
+	 */
+	ssec, _, loc, err := step1Ssecurity(ctx, sessionID, deviceID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("step1 失败：%w", err)
 	}
 	if ssec == "" {
-		return "", errors.New("刷新后 ssecurity 为空")
+		return "", errors.New("step1 未返回 ssecurity（passToken 可能已失效）")
 	}
+	if loc == "" {
+		return "", errors.New("step1 未返回 sts location（无法换取新 serviceToken）")
+	}
+	if !allowedVerifyURL(loc) && !strings.HasPrefix(loc, "https://sts.api.io.mi.com/") {
+		return "", fmt.Errorf("sts location 不在可信范围：%s", loc)
+	}
+	if aerr := absorbLocation(ctx, sessionID, deviceID, loc); aerr != nil {
+		return "", fmt.Errorf("换 serviceToken 失败：%w", aerr)
+	}
+	ctx.LogWarn("hx-mi 服务票据已刷新（step1+sts 均成功）")
 	// 把新 ssecurity 写回会话材料，否则下次调用还是旧的。
 	mat, _, oerr := ctx.VaultBlobOpen("xiaomi_session_material")
 	if oerr == nil {
