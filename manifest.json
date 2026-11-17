@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.138",
+  "version": "2.0.0-alpha.139",
   "publisher": {
     "id": "homex",
     "display_name": "HOMEX Official",
@@ -126,6 +126,10 @@
       },
       {
         "name": "ir_send",
+        "risk": "medium"
+      },
+      {
+        "name": "ir_raw",
         "risk": "medium"
       }
     ],

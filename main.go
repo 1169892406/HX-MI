@@ -424,6 +424,8 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		return applySyncSettingsTool(ctx, args)
 	case "ir_lib":
 		return irLibTool(ctx, args)
+	case "ir_raw":
+		return irRawTool(ctx, args)
 	case "ir_send":
 		return irSendTool(ctx, args)
 	case "cred_check":

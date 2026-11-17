@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"bytes"
 	"compress/gzip"
 	"crypto/aes"
@@ -163,17 +164,76 @@ func decryptIrPattern(enc string, freq int) (irPattern, error) {
 	return irPattern{Frequency: freq, Timings: timings}, nil
 }
 
-// irEncodeForPlay 把波形压成 `miIO.ir_play` 要的 base64 形式。
-//
-// 小米设备接受的 `code` 是**原始时长数组的紧凑二进制编码**，
-// 社区实测两种形态都能被老固件接受：
-//   - JSON 数组文本再 base64；
-//   - 原始字节（每项 2 字节大端，单位微秒/50）。
-// 这里先用**最直白的 JSON 文本 + base64**：它不依赖"除以 50"这种缩放假设，
-// 且失败时能从错误码立刻看出是格式问题而不是幅度问题。
-func irEncodeForPlay(p irPattern) string {
-	b, _ := json.Marshal(p.Timings)
-	return base64.StdEncoding.EncodeToString(b)
+/*
+ * irEncodeForPlay 把波形编码成 `miIO.ir_play` 要的 `code`。
+ *
+ * # 格式（2026-11-17 从 python-miio 权威定义确认，不是猜的）
+ *
+ *	Const(0xA567, Int16ul)               // magic，2 字节小端
+ *	edge_count (Int16ul)                 // 边对数
+ *	times_index: Array(16, Int32ul)      // 去重后的时长查表（最多 16 个，不足补 0）
+ *	edge_pairs:  edge_count × 1 字节     // 每字节 = (gap索引<<4) | pulse索引
+ *
+ * 这是 python-miio 的 `ChuangmiIrSignal`；我用社区实测可用的码反解验证过：
+ *	magic=0xA567 edge_count=83 表=[528,606,1647,2239,4513,9019,...]
+ *	pair0 = 9019us 脉冲 + 4513us 间隔（NEC 典型头）
+ *
+ * # 为什么不能直接用 JSON 数组
+ *
+ * 我最初把时长数组 JSON 化再 base64，那是**错的**：设备要的是上面这个
+ * 索引压缩格式（4 位索引 ⇒ 最多 16 个不同时长，红外波形通常只有几个）。
+ */
+func irEncodeForPlay(p irPattern) (string, error) {
+	t := p.Timings
+	if len(t) < 2 {
+		return "", errors.New("波形过短")
+	}
+	if len(t)%2 != 0 {
+		t = t[:len(t)-1] // 丢弃落单的最后一个脉冲
+	}
+	// ① 去重排序建表（最多 16 项）
+	uniq := map[int]bool{}
+	for _, v := range t {
+		if v > 0 {
+			uniq[v] = true
+		}
+	}
+	if len(uniq) > 16 {
+		return "", fmt.Errorf("波形含 %d 个不同时长，超过协议上限 16", len(uniq))
+	}
+	table := make([]int, 0, len(uniq))
+	for v := range uniq {
+		table = append(table, v)
+	}
+	sort.Ints(table)
+	idx := make(map[int]int, len(table))
+	for i, v := range table {
+		idx[v] = i
+	}
+	// ② 边对：每对 = (pulse, gap)
+	pairs := make([]byte, 0, len(t)/2)
+	for i := 0; i+1 < len(t); i += 2 {
+		pulse, gap := t[i], t[i+1]
+		pi, ok1 := idx[pulse]
+		gi, ok2 := idx[gap]
+		if !ok1 || !ok2 {
+			return "", errors.New("波形索引映射失败")
+		}
+		pairs = append(pairs, byte(gi<<4)|byte(pi))
+	}
+	// ③ 组包
+	buf := make([]byte, 0, 4+64+len(pairs))
+	buf = append(buf, 0x67, 0xA5)
+	buf = append(buf, byte(len(pairs)), byte(len(pairs)>>8))
+	for i := 0; i < 16; i++ {
+		v := 0
+		if i < len(table) {
+			v = table[i]
+		}
+		buf = append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+	}
+	buf = append(buf, pairs...)
+	return base64.StdEncoding.EncodeToString(buf), nil
 }
 
 // irModelEntry 是型号树里一条可用波形。
@@ -354,9 +414,13 @@ func playIRLocal(ctx *plugin.Context, blaster miioDevice, token []byte, p irPatt
 	 *   · "UDP 等待响应超时"**视为已发射**（很多固件就是不发应答）；
 	 *   · 只有设备**明确回错误码**才算失败。
 	 */
+	code, cerr := irEncodeForPlay(p)
+	if cerr != nil {
+		return cerr
+	}
 	env, err := miioExchangeWith(ctx, blaster, token, "miIO.ir_play", map[string]any{
 		"freq": p.Frequency,
-		"code": irEncodeForPlay(p),
+		"code": code,
 	}, miioExchangeOptions{Attempts: 1})
 	if err != nil {
 		if strings.Contains(err.Error(), "等待响应超时") || strings.Contains(err.Error(), "读取响应失败") {
@@ -626,4 +690,70 @@ func irSendTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, err
 		"via": blaster.Name, "frequency": p.Frequency, "timing_count": len(p.Timings),
 		"note": "音箱已接受该波形（code=0）",
 	})
+}
+
+/*
+ * ir_raw 工具：把**任意时长数组**按设备要求的格式发出去（`ir_raw`）。
+ *
+ *	{"freq":36000,"timings":[1000,580,...],"dry_run":true}
+ *
+ * # 为什么需要（2026-11-17）
+ *
+ * 小米电视的红外协议与 NEC 不同：Mi Remote 码库里 `小米` 品牌在电视类型下
+ * **节点数为 0**（小米电视走蓝牙遥控，库里没有红外码），但用户明确反馈
+ * "开关机必须走红外，否则电视关机后蓝牙连不上" —— 说明电视确实有红外接收器。
+ *
+ * 于是改走**按协议自造码**：hifi-remote 论坛已逆向出
+ *	XIAOMI IR（RC-MM 变种）：[HEADER][D:8][F:8][C:4]，设备码 0x86 / Power 用 0x3C
+ * 该工具就是把这套生成出来的时长直接发射，便于逐次试码而不必每次改插件。
+ *
+ * 安全：同样支持 dry_run；真发时只尝试一次。
+ */
+func irRawTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
+	var in struct {
+		Freq    int   `json:"freq"`
+		Timings []int `json:"timings"`
+		DryRun  bool  `json:"dry_run"`
+	}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &in); err != nil {
+			return nil, err
+		}
+	}
+	if in.Freq <= 0 {
+		in.Freq = 36000
+	}
+	if len(in.Timings) < 4 {
+		return nil, errors.New("timings 至少需要 4 个值（成对的脉冲/间隔）")
+	}
+	p := irPattern{Frequency: in.Freq, Timings: in.Timings}
+	code, cerr := irEncodeForPlay(p)
+	if cerr != nil {
+		return nil, cerr
+	}
+	if in.DryRun {
+		return json.Marshal(map[string]any{
+			"dry_run": true, "frequency": p.Frequency,
+			"timings": len(p.Timings), "code_bytes": len(code),
+			"code_head": code[:minInt(len(code), 60)],
+		})
+	}
+	blaster, token, berr := blasterDevice(ctx)
+	if berr != nil {
+		return nil, berr
+	}
+	if perr := playIRLocal(ctx, blaster, token, p); perr != nil {
+		return nil, fmt.Errorf("发射失败：%w", perr)
+	}
+	return json.Marshal(map[string]any{
+		"sent": true, "via": blaster.Name, "frequency": p.Frequency,
+		"timings": len(p.Timings),
+	})
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
