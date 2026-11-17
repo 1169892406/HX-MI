@@ -935,6 +935,10 @@
        */
       var iv = document.createElement('select');
       iv.setAttribute('aria-label', '同步间隔（分钟）');
+      // data-role 供 applyTokenLinkage() 定位（未开自动续 token 时要和开关一起置灰）。
+      // 2026-11-17 实测：原来没有这个属性，选择器 `select[data-role="interval"]`
+      // 永远匹配不到 ⇒ 开关灰了、下拉还是能点，联动看起来"只做了一半"。
+      iv.setAttribute('data-role', 'interval');
       var curMin = Math.max(1, Math.round(val.intervalSeconds / MIN_PER_MINUTE));
       [5, 10, 15, 30, 60, 120].concat(curMin && [5,10,15,30,60,120].indexOf(curMin) < 0 ? [curMin] : [])
         .forEach(function (m) {

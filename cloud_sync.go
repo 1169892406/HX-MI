@@ -320,11 +320,21 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		 */
 		isMedia := hasCap(ds[index[external]].Capabilities, "media_player") ||
 			strings.Contains(strings.ToLower(c.Model), "speaker")
+		/*
+		 * 每轮轮询**上限**（2026-11-17 用户报「设备状态都是未知」）。
+		 *
+		 * 原来是 `summary["states"] < 1` —— **每轮只读 1 台**。家里 11 台设备、
+		 * 同步 5 分钟一轮 ⇒ 轮完一遍要 **55 分钟**，用户点开设备看到的自然是
+		 * 十几小时前的旧值，甚至从来没有值（"未知"）。
+		 *
+		 * 改成 `statePollBudget`：按设备数自适应（见该常量注释），
+		 * 局域网直连读很快（实测 3~35ms），云端读慢（百毫秒~秒级）。
+		 */
 		pollSensor := false
-		if (isSensorLikeModel(c.Model) || isMedia) && summary["states"] < 1 {
-			// 传感器还要求有 LAN 地址；音响走云端，不要求。
+		if isSensorLikeModel(c.Model) || isMedia {
 			if isMedia || strings.TrimSpace(c.LocalIP) != "" {
-				pollSensor = true
+				limit := statePollBudget(len(ds))
+				pollSensor = summary["states"] < limit
 			}
 		}
 		if pollSensor && isMedia {
@@ -647,6 +657,8 @@ func specControls(ctx *plugin.Context, model string) []map[string]any {
 		return nil
 	}
 	out := []map[string]any{}
+	// onTaken 记录已占用"能力名"作为实例名的能力（每个能力只允许一个主实例）
+	onTaken := map[string]bool{}
 	for _, svc := range sp.Services {
 		if svc.IID == 1 {
 			continue
@@ -680,7 +692,40 @@ func specControls(ctx *plugin.Context, model string) []map[string]any {
 			 * 所以用 `服务名_属性名`：speaker_mute / microphone_mute，既唯一又可读。
 			 */
 			propName := actionNameOf(pr.Type)
+			/*
+			 * ⚠ **主开关（属性名 `on`）的实例名必须保持为能力名本身**（2026-11-17）。
+			 *
+			 * 事故：台灯原来有 `switch`（主开关）+ `indicator_light_on`（指示灯），
+			 * 我加了"服务名_属性名"命名后主开关变成 `switch_on`，
+			 * 而**平台上报状态时无法带 instance_id**
+			 * （`pluginres.StateHandler.PublishPluginState` 只有 capability/property/value，
+			 * 设备域统一记成 `instance_id = 能力名`）。
+			 *
+			 * 结果：能力实例叫 `switch_on`、状态行叫 `switch` ⇒ 前端
+			 * `readProperty(rows,'switch','power','switch_on')` 严格匹配失败 ⇒
+			 * 卡片永远显示「未知」，而设备明明在线且有值（用户截图指出）。
+			 *
+			 * `on` 是 MIoT 里"主开关"的通用属性名，把它还原成能力名，
+			 * 状态与能力就再次对齐；其余属性（indicator_light / sleep_mode / mute …）
+			 * 仍用 `服务名_属性名` 保证唯一。
+			 */
 			instName := svcIID + "_" + propName
+			/*
+			 * 只有**第一个** `on` 属性才用能力名（2026-11-17 实测配对 500）。
+			 *
+			 * 台灯的规格里有两个服务都带 `on`：service 2（主开关）与
+			 * service 3（指示灯）。我上一版把两者都映射成 `switch` ⇒
+			 * 撞上 `device_capabilities` 的唯一键
+			 * `(device_id, endpoint_id, type, instance_id)` ⇒ 配对直接 500。
+			 *
+			 * 现在：主开关（第一个 on）→ `switch`（与状态行的 instance_id 对齐，
+			 * 平台上报状态时无法带实例，只能按能力名记）；
+			 * 指示灯 → `indicator_light_on`（保持「服务名_属性名」）。
+			 */
+			if propName == "on" && !onTaken[capName] {
+				instName = capName
+				onTaken[capName] = true
+			}
 			c := map[string]any{
 				"capability":  capName,
 				"instance_id": instName,
@@ -1006,4 +1051,30 @@ func hasAccess(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// statePollBudget 是单轮同步里最多读几台设备的状态。
+//
+// # 为什么需要它（2026-11-17 用户报「设备状态都是未知」）
+//
+// 原实现硬编码"每轮 1 台"：11 台设备 × 5 分钟一轮 ⇒ **55 分钟**才轮完一遍。
+// 用户点开设备页看到的是十几小时前的旧值，或干脆没有值（显示"未知"）。
+//
+// 但也不能无上限 —— wasm 单线程 + 插件 30s 执行预算：
+//   · 局域网直连读：实测 3~35ms/台（很快）
+//   · 云端读：百毫秒~秒级，失败还要重试
+//
+// 取"设备数的 1/3、最少 2 台、最多 6 台"：
+//   · 3 台设备 → 每轮 2 台（几乎立刻全覆盖）
+//   · 11 台    → 每轮 3 台（约 3 轮 = 15 分钟覆盖一遍，比 55 分钟好 3.7 倍）
+//   · 30 台    → 每轮 6 台（封顶，避免拖垮同步）
+func statePollBudget(deviceCount int) int {
+	n := deviceCount / 3
+	if n < 2 {
+		n = 2
+	}
+	if n > 6 {
+		n = 6
+	}
+	return n
 }
