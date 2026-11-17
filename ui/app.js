@@ -316,6 +316,75 @@
     });
   }
 
+  /*
+   * 健康检查表（2026-11-17 新增）。
+   *
+   * 三条真实通信路径分别检测，状态语义必须分清：
+   *   在线       —— 局域网 UDP 探测通（有独立 IP 的设备）
+   *   离线       —— 3 秒无响应
+   *   网关读取   —— 蓝牙/Zigbee 设备，数据经音箱网关取；检测的是**网关链路**
+   *   云端可用   —— 红外遥控，单向发射无回读，只表示"账号有效即可用"
+   * 「云端可用」绝不是「离线」—— 前者正常，后者是故障。
+   */
+  function renderHealth(data) {
+    var box = el('health-table');
+    if (!box) return;
+    var list = (data && data.devices) || [];
+    if (!list.length) {
+      box.innerHTML = '<p class="muted small">暂无设备。</p>';
+      return;
+    }
+    var html = '<table class="htable"><thead><tr>' +
+      '<th>设备</th><th>型号</th><th style="width:110px">版本</th>' +
+      '<th style="width:96px">状态</th><th style="width:92px">耗时</th></tr></thead><tbody>';
+    for (var i = 0; i < list.length; i++) {
+      var d = list[i] || {};
+      var status = d.status || '';
+      var cls = status === '在线' ? 'on'
+        : status === '离线' ? 'off'
+        : status === '网关设备' ? 'gw' : 'cloud';
+      var lat = d.latency || '不适用';
+      var latCls = lat === '不适用' ? 'na' : (status === '在线' ? 'ok' : 'bad');
+      var ver = d.version ? d.version : '-';
+      var detail = d.path_detail || d.path || '';
+      html += '<tr>' +
+        '<td><div class="hname">' + esc(d.name) + '</div>' +
+        (detail ? '<div class="hsub">' + esc(detail) + '</div>' : '') + '</td>' +
+        '<td><span class="hver">' + esc(d.model) + '</span></td>' +
+        '<td><span class="hver">' + esc(ver) + '</span></td>' +
+        '<td><span class="hst hst--' + cls + '">' + esc(status) + '</span></td>' +
+        '<td><span class="hlat hlat--' + latCls + '">' + esc(lat) + '</span></td>' +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    box.innerHTML = html;
+    scheduleHeight();
+  }
+
+  function loadHealth() {
+    rpc('plugin.tool.call', { tool: 'health_list', args: {} })
+      .then(function (res) {
+        if (failed(res)) {
+          var box = el('health-table');
+          if (box) box.innerHTML = '<p class="muted small">读取失败：' + esc(failText(res)) + '</p>';
+          scheduleHeight();
+          return;
+        }
+        renderHealth(res);
+      })
+      .catch(function (e) {
+        var box = el('health-table');
+        if (box) box.innerHTML = '<p class="muted small">读取失败：' + esc(errText(e)) + '</p>';
+        scheduleHeight();
+      });
+  }
+
+  function esc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
   function showBanner(text, kind) {
     var b = el('banner');
     b.textContent = text;
@@ -368,6 +437,67 @@
     el('f-region').value = config.region || 'cn';
     var f = config.device_filter_models;
     el('f-filter').value = Array.isArray(f) ? f.join(', ') : '';
+    // 自动续 token（2026-11-17）：默认开启；用它驱动风险提示与同步开关的可用性
+    var savePw = config.save_password !== false;
+    el('f-save-password').checked = savePw;
+    applyTokenLinkage(savePw);
+    // 命令优先通道：默认 lan
+    var pri = config.lan_priority || 'lan';
+    var radios = document.querySelectorAll('input[name="lan-priority"]');
+    for (var i = 0; i < radios.length; i++) {
+      radios[i].checked = (radios[i].value === pri);
+    }
+    // 离线检查间隔：默认 5 秒
+    var li = config.lan_check_interval_seconds || config.healthcheck_interval_seconds || 5;
+    el('f-lan-interval').value = li;
+    var lbl = el('health-interval-label');
+    if (lbl) lbl.textContent = '每 ' + li + ' 秒自动检测';
+  }
+
+  /*
+   * 自动续 token 与「自动同步」的联动（2026-11-17 用户明确要求）。
+   *
+   * 不开自动续 token ⇒ Token 过期后会**静默失败**，
+   * 而"自动同步"恰恰是靠 Token 定时拉云端列表的 —— 让它留在"开"的状态只会
+   * 掩盖问题（用户看到"已开启"却同步不到新设备）。所以：
+   *   · 「自动同步」开关 + 间隔下拉 **一起置灰不可用**
+   *   · 「手动同步」按钮**仍可用**；Token 过期时点击会明确提示
+   *     「登录已过期，请重新登录」并给出「去登录」入口（见 doSyncNow）
+   */
+  function applyTokenLinkage(savePw) {
+    var risk = el('token-risk');
+    if (risk) risk.hidden = !savePw;
+
+    var sw = el('sw-polling');
+    var row = el('polling-row');
+    if (sw) {
+      sw.setAttribute('aria-disabled', savePw ? 'false' : 'true');
+      sw.setAttribute('tabindex', savePw ? '0' : '-1');
+      if (row) row.classList.toggle('is-disabled', !savePw);
+    }
+    // 间隔下拉（列表里每条同步的"每 N 分钟"）一起置灰
+    var sels = document.querySelectorAll('#sync-rows select[data-role="interval"]');
+    for (var i = 0; i < sels.length; i++) {
+      sels[i].disabled = !savePw;
+    }
+    var hint = el('token-link-hint');
+    if (hint) hint.hidden = savePw;
+  }
+
+  /** 手动同步后若 Token 已过期，给出**明确**提示（不是静默失败）。 */
+  function manualSyncExpiredHint(msg) {
+    var m = String(msg || '');
+    if (m.indexOf('SERVICETOKEN') < 0 && m.indexOf('登录已过期') < 0 &&
+        m.indexOf('auth') < 0 && m.indexOf('Token') < 0) {
+      return false;
+    }
+    banner(
+      '登录已过期，请重新登录 —— ' +
+      'Token 失效后无法读取云端设备列表（红外设备也因此不可控）。',
+      'error',
+      { action: '重新登录', onAction: function () { openLogin(); } }
+    );
+    return true;
   }
 
   /** 自动同步开关（全局：驱动宿主后台任务的 polling_enabled）。 */
@@ -393,6 +523,12 @@
       .split(',')
       .map(function (s) { return s.trim(); })
       .filter(function (s) { return s !== ''; });
+    // 自动续 token / 通道优先 / 离线检查间隔（2026-11-17）
+    out.save_password = !!el('f-save-password').checked;
+    var picked = document.querySelector('input[name="lan-priority"]:checked');
+    out.lan_priority = picked ? picked.value : 'lan';
+    var li = parseInt(el('f-lan-interval').value, 10);
+    out.lan_check_interval_seconds = (li >= 5 && li <= 3600) ? li : 5;
     return out;
   }
 
@@ -837,6 +973,9 @@
       row.appendChild(ops);
       box.appendChild(row);
     });
+    // 渲染完同步行后再跑一次联动：Token 未开启时把间隔下拉置灰
+    applyTokenLinkage(!!(el('f-save-password') && el('f-save-password').checked));
+    scheduleHeight();
   }
 
   /*
@@ -1250,14 +1389,22 @@
       .then(function (res) {
         // 业务失败帧与"状态不是 succeeded"是两件不同的事，都要如实说。
         if (failed(res)) {
-          showBanner('同步失败：' + failText(res), 'err');
+          // Token 过期是**可自愈**的一种失败（重新登录即可），
+          // 所以单独给一句"登录已过期，请重新登录"+ 去登录入口，
+          // 而不是和普通同步失败混在一起（2026-11-17 用户明确要求）。
+          if (!manualSyncExpiredHint(failText(res))) {
+            showBanner('同步失败：' + failText(res), 'err');
+          }
         } else if (res && res.state === 'succeeded') {
           var sum = res.summary || {};
           lastSyncSummary = sum;
           showBanner('同步完成：云端 ' + (sum.cloud || 0) + ' 台 · 新增 ' + (sum.added || 0) +
             ' · 更新 ' + (sum.updated || 0) + (sum.failed ? ' · 失败 ' + sum.failed : ''), 'ok');
         } else {
-          showBanner('同步失败：' + ((res && res.error) || '原因未提供'), 'err');
+          var why = (res && res.error) || '原因未提供';
+          if (!manualSyncExpiredHint(why)) {
+            showBanner('同步失败：' + why, 'err');
+          }
         }
         loadSyncResult();
         loadAccounts();
@@ -1449,6 +1596,29 @@
     el('btn-verify').addEventListener('click', submitVerify);
     el('btn-verify-web').addEventListener('click', submitVerifyWeb);
     el('btn-reload-accounts').addEventListener('click', function () { loadAccounts(); loadSyncResult(); });
+    // 健康检查（2026-11-17）：立即检查
+    var hb = el('btn-health-refresh');
+    if (hb) hb.addEventListener('click', function () { loadHealth(); });
+    // 自动续 token 开关：即时联动风险提示与「自动同步」可用性
+    var sp = el('f-save-password');
+    if (sp) {
+      sp.addEventListener('change', function () {
+        applyTokenLinkage(!!sp.checked);
+        markDirty(true); // 属于配置项，需要点「保存配置」才生效
+        scheduleHeight();
+      });
+    }
+    // 离线检查间隔改动 → 更新标签
+    var li = el('f-lan-interval');
+    if (li) {
+      li.addEventListener('change', function () {
+        var v = parseInt(li.value, 10);
+        if (!(v >= 5 && v <= 3600)) { v = 5; li.value = 5; }
+        var lbl = el('health-interval-label');
+        if (lbl) lbl.textContent = '每 ' + v + ' 秒自动检测';
+        markDirty(true);
+      });
+    }
     el('btn-diag').addEventListener('click', loadDiag);
     el('btn-add-sync').addEventListener('click', function () {
       // 已展开时再点＝收起（同一个按钮两种状态，不需要额外的取消入口）。
@@ -1517,6 +1687,7 @@
      */
     loadAccounts();
     loadSyncResult();
+    loadHealth();
     rpc('plugin.config.get', {})
       .then(function (res) {
         config = (res && res.config) || {};

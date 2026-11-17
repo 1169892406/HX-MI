@@ -36,6 +36,29 @@
         <button type="button" id="btn-add" class="btn btn--sm btn--primary">添加账号</button>
       </div>
       <div id="accounts" class="accounts"><p class="muted">读取中…</p></div>
+
+      <!-- 自动续 token（2026-11-17 用户要求）：默认开启，带三条风险/影响提示。
+           开启后密码进保险库，Token 过期时自动重登；不开启则过期后红外不可控、
+           新增设备无法自动同步（这两条必须让用户看见，否则会误以为"插件坏了"）。 -->
+      <div class="row tokenrow">
+        <div class="row__main">
+          <b>自动续 token</b>
+          <p class="muted small">保存账号密码，Token 过期时自动重新登录，免去反复手动登录。</p>
+        </div>
+        <span class="spacer"></span>
+        <label class="sw">
+          <input type="checkbox" id="f-save-password" checked>
+          <span class="sw__ui"></span>
+        </label>
+      </div>
+      <div class="riskbox" id="token-risk">
+        <div class="riskbox__hd"><span class="riskbox__i">!</span>开启后账号密码将加密保存在平台保险库，存在安全风险</div>
+        <ul>
+          <li><b>安全风险</b>：密码保存在服务端，平台被攻破时账号可能泄露，请自行权衡。</li>
+          <li><b>不开启时</b>：Token 失效后<b>红外设备无法控制</b>（红外须经云端发送）。</li>
+          <li><b>不开启时</b>：Token 过期后<b>新增设备无法自动同步</b>，需手动重新登录。</li>
+        </ul>
+      </div>
     </div>
 
     <!-- 登录表单：点「添加账号」展开（已登录时也能展开 —— 那是"再加一个账号"）-->
@@ -88,7 +111,52 @@
     </div>
   </section>
 
-  <!-- ── ② 同步与设备 ──────────────────────────────────────-->
+  <!-- ── ② 控制通道（2026-11-17 新增）──────────────────────-->
+  <section class="sec">
+    <div class="sec__hd"><span class="dot"></span><h2>控制通道</h2><span class="tag-new">新增</span></div>
+    <p class="sec__d">决定设备命令优先走哪条通道。</p>
+
+    <div class="card">
+      <div class="row">
+        <div class="row__main">
+          <b>命令优先通道</b>
+          <p class="muted small">同一台设备同时支持两条通道时，优先使用所选通道；不可用时自动回退另一条。</p>
+        </div>
+      </div>
+
+      <div class="pick2">
+        <label class="pk">
+          <input type="radio" name="lan-priority" value="lan" checked>
+          <span class="pk__body">
+            <span class="pk__t">LAN 局域网优先 <em class="pk__def">默认</em></span>
+            <span class="pk__d">命令直达设备，实测 100~500ms；不依赖账号登录状态。</span>
+          </span>
+        </label>
+        <label class="pk">
+          <input type="radio" name="lan-priority" value="cloud">
+          <span class="pk__body">
+            <span class="pk__t">云端优先</span>
+            <span class="pk__d">经小米服务器转发；局域网不通时更可靠。</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row" style="margin-top:18px;border-top:1px solid var(--line);padding-top:16px">
+        <div class="row__main">
+          <b>离线检查间隔</b>
+          <p class="muted small">局域网健康检查默认开启（无开关），定时发 UDP 探测包（无副作用）判定在线 / 离线。</p>
+        </div>
+        <span class="spacer"></span>
+        <span class="ival">
+          <input type="number" id="f-lan-interval" min="5" max="3600" step="1" value="5" aria-label="离线检查间隔（秒）">
+          秒
+        </span>
+      </div>
+      <div class="nohint">⏱ 单台探测超时 <b>3 秒</b>；上次探测未返回时<b>跳过本次</b>，不堆叠检测。<br>蓝牙 / Zigbee 设备经网关读取，用的是<b>音箱的局域网链路</b>，同样计入健康检查。</div>
+    </div>
+  </section>
+
+  <!-- ── ③ 同步与设备 ──────────────────────────────────────-->
   <section class="sec">
     <div class="sec__hd"><span class="dot"></span><h2>同步与设备</h2></div>
     <p class="sec__d">控制云端设备列表的拉取节奏与范围。</p>
@@ -213,3 +281,19 @@
 <script src="app.js"></script>
 </body>
 </html>
+  <!-- ── ④ 健康检查（2026-11-17 新增）────────────────────-->
+  <section class="sec">
+    <div class="sec__hd"><span class="dot"></span><h2>健康检查</h2><span class="tag-new">新增</span></div>
+    <p class="sec__d">按设备实际通信路径分别检测：局域网直连 / 网关读取 / 云端下发。单台超时 3 秒，上次未返回则跳过本次（不堆叠）。</p>
+
+    <div class="card">
+      <div class="row-hd">
+        <b>设备健康检查</b>
+        <span class="muted small" id="health-interval-label">每 5 秒自动检测</span>
+        <span class="spacer"></span>
+        <button type="button" id="btn-health-refresh" class="btn btn--sm">↻ 立即检查</button>
+      </div>
+      <div id="health-table"><p class="muted small">读取中…</p></div>
+    </div>
+  </section>
+
