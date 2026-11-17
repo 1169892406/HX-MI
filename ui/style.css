@@ -350,3 +350,23 @@ pre {
 .hst--off{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca}
 .hst--cloud{color:#0369a1;background:#e0f2fe;border:1px solid #bae6fd}
 .hst--gw{color:#6d28d9;background:#f5f3ff;border:1px solid #ddd6fe}
+
+/* ── 通用行布局（2026-11-17 补）────────────────────────────
+   事故：`index.html` 里三处用了 `class="row"` + `row__main` + `spacer`，
+   但**这三个类从来没有定义过样式** ⇒ 全是普通块级元素、纵向堆叠，
+   于是「自动续 token」的开关跑到标题下方左侧（用户截图指正：
+   应该在右侧、与标题同一行）。
+
+   `grid` 而不是 `flex`：左侧说明文字可能多行，`flex:1` + `min-width:0`
+   在长文本下容易把右侧开关挤出去；两列栅格更稳。 */
+.row{
+  display:grid;
+  grid-template-columns:1fr auto;
+  align-items:center;
+  gap:16px;
+}
+.row__main{min-width:0}
+.row__main > b{font-size:13.5px;font-weight:600;display:block}
+.row__main > p{margin:5px 0 0;line-height:1.55}
+/* .spacer 在 grid 里没有意义（列已固定），保留给 flex 场景 */
+.row > .spacer{display:none}
