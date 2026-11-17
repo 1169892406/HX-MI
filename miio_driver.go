@@ -262,6 +262,28 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 	if err != nil {
 		return err
 	}
+	/*
+	 * 命令优先通道（2026-11-17 用户要求二选一，`lan_priority`）：
+	 *   lan   —— 局域网优先（默认）：走下面的 LAN 直连，失败**不自动降级**
+	 *            到云端（LAN 失败多为设备离线，云端也大概率不通；
+	 *            而且静默降级会让"局域网更快"这个承诺变成谎言）；
+	 *   cloud —— 云端优先：这里就转云端，成功即返回；云端不支持该动作时
+	 *            再落到下面走局域网（"优先"而非"只用"）。
+	 *
+	 * ⚠ 此前 `lan_priority` 只是**存了配置项**、路由完全没读 —— 用户实测
+	 * 「和自动同步没有区别」正是这个原因。现在真正生效。
+	 */
+	if strings.EqualFold(current.LanPriority, "cloud") {
+		handled, cerr := tryCloudCommand(ctx, *d, cmd)
+		if handled && cerr == nil {
+			return nil
+		}
+		if handled && cerr != nil {
+			// 云端明确失败：记录后继续尝试局域网（体现"优先"语义）
+			ctx.LogWarn("hx-mi 云端优先通道失败，回退局域网（设备 %s）：%v", d.ExternalID, cerr)
+		}
+		// 云端不支持该动作 ⇒ handled=false，直接落到局域网路径
+	}
 	token, _, err := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID)
 	if err != nil || len(token) != 16 {
 		return errors.New("设备 token Vault 不可用")
@@ -1468,4 +1490,86 @@ func execSpecDriven(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
 		return fmt.Errorf("规格里找不到 bool 属性 %q", inst)
 	}
 	return fmt.Errorf("不支持的规格驱动能力 %q", cmd.Capability)
+}
+
+/*
+ * tryCloudCommand 尝试用**云端**执行一条命令（`lan_priority=cloud` 时优先走它）。
+ *
+ * 返回 (handled, err)：
+ *   · handled=false → 云端不执行这类命令（如亮度/模式），调用方走局域网
+ *   · handled=true, err=nil → 云端已执行
+ *   · handled=true, err!=nil → 云端支持但执行失败（调用方可回退局域网）
+ *
+ * 只覆盖云端确实支持的几类：开关（switch）、红外（已在前面分流）、
+ * 媒体控制（已有 cloudMediaCommand）。其余动作返回 handled=false 是**诚实**的
+ * —— 云端不支持就不假装支持。
+ */
+func tryCloudCommand(ctx *plugin.Context, d miioDevice, cmd miioCommand) (bool, error) {
+	switch strings.ToLower(cmd.Action) {
+	case "turn_on", "turn_off":
+		if !hasCap(d.Capabilities, "switch") {
+			return false, nil
+		}
+		on := strings.EqualFold(cmd.Action, "turn_on")
+		if err := cloudSetPower(ctx, d, on); err != nil {
+			return true, err
+		}
+		// 不伪造状态：云端 set 成功只代表"请求被接受"，
+		// 真实开关态由周期轮询读回（与红外同一口径）。
+		return true, nil
+	}
+	return false, nil
+}
+
+// cloudSetPower 经云端设置开关（`lan_priority=cloud` 时优先走它）。
+//
+// 实现走 MIoT `prop/set`：从规格里找**可写 bool 且名字像开关**的属性。
+// 不写死 siid/piid —— 不同型号位置不同，写死就是硬编码。
+func cloudSetPower(ctx *plugin.Context, d miioDevice, on bool) error {
+	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
+	if err != nil {
+		return fmt.Errorf("无云会话（需先登录）：%w", err)
+	}
+	defer func() { _ = ctx.HTTPClose(sessionID) }()
+
+	typ, ok := lookupModelType(d.Model)
+	if !ok {
+		return fmt.Errorf("型号 %s 不在目录中", d.Model)
+	}
+	sp, serr := loadMIoTSpec(ctx, typ)
+	if serr != nil {
+		return fmt.Errorf("读取规格失败：%w", serr)
+	}
+	// 候选属性名：on / power / switch-status（按常见顺序）
+	cands := []string{"on", "power", "switch-status", "switch_status"}
+	for _, svc := range sp.Services {
+		for _, pr := range svc.Properties {
+			if !hasAccess(pr.Access, "write") || pr.Format != "bool" {
+				continue
+			}
+			name := actionNameOf(pr.Type)
+			match := false
+			for _, c := range cands {
+				if name == c {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+			rows, perr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/set",
+				[]map[string]any{{"did": d.ExternalID, "siid": svc.IID, "piid": pr.IID, "value": on}})
+			if perr != nil {
+				return perr
+			}
+			for _, r := range rows {
+				if code, ok := r["code"].(float64); ok && int(code) != 0 {
+					return fmt.Errorf("云端拒绝设置开关（code=%d）", int(code))
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("型号 %s 的规格里没有可写的开关属性", d.Model)
 }
