@@ -222,9 +222,21 @@ func irEncodeForPlay(p irPattern) (string, error) {
 		pairs = append(pairs, byte(gi<<4)|byte(pi))
 	}
 	// ③ 组包
+	/*
+	 * edge_count = 边对数×2 - 1（**不是**边对数）。
+	 *
+	 * 2026-11-17 用社区实测可用的码做往返测试发现的：
+	 *	原码 42 个边对字节、edge_count=0x53=83 = 42×2-1
+	 *	我原来写成 42 ⇒ 设备收到边数与实际不符，静默丢弃（电视无反应）
+	 * 物理含义：N 对(脉冲,间隔) = 2N 个时长 = 2N-1 个跳变（edge）。
+	 */
+	edgeCount := len(pairs)*2 - 1
+	if edgeCount < 0 {
+		edgeCount = 0
+	}
 	buf := make([]byte, 0, 4+64+len(pairs))
 	buf = append(buf, 0x67, 0xA5)
-	buf = append(buf, byte(len(pairs)), byte(len(pairs)>>8))
+	buf = append(buf, byte(edgeCount), byte(edgeCount>>8))
 	for i := 0; i < 16; i++ {
 		v := 0
 		if i < len(table) {
@@ -284,12 +296,15 @@ func fetchIROptions(ctx *plugin.Context, deviceID, brandID string) ([]irModelEnt
 
 // irCacheFile 是落盘的波形缓存（按 品牌+按键 存，跨用户共享同一份码库）。
 type irCacheFile struct {
-	FetchedAt string                            `json:"fetched_at"`
-	Entries   map[string]map[string]irPattern    `json:"entries"` // brandID → keyID → 波形
+	FetchedAt string                         `json:"fetched_at"`
+	Entries   map[string]map[string]irPattern `json:"entries"` // brandID → keyID → 波形
+	// Learned 存**学到的码**（原始 miIO code 字符串），键是用户起的名字。
+	// 这是通用插件的关键资产：一次学习、永久离线可用，与品牌/协议无关。
+	Learned map[string]string `json:"learned"`
 }
 
 func loadIRCache(ctx *plugin.Context) irCacheFile {
-	c := irCacheFile{Entries: map[string]map[string]irPattern{}}
+	c := irCacheFile{Entries: map[string]map[string]irPattern{}, Learned: map[string]string{}}
 	r, err := ctx.FSRead(irDBCachePath)
 	if err != nil || !r.Found {
 		return c
@@ -756,4 +771,127 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+/*
+ * 学习模式 —— 通用插件的**万能兜底**（2026-11-17 用户："你这个不适通用的啊"）。
+ *
+ * # 为什么必须做这个
+ *
+ * 前两条路都有盲区：
+ *   · 公开码库：只覆盖库里有码的品牌（小米/红米电视就没有，节点数 0）；
+ *   · 按协议自造码：一种协议只能覆盖一个品牌族，换台电视就得重来。
+ * 都不是"通用插件"该有的样子。
+ *
+ * 而音箱固件本身支持学习：
+ *	miIO.ir_learn {"key":"1"}   进入学习（等用户拿原遥控器对着音箱按一下）
+ *	miIO.ir_read  {"key":"1"}   读回学到的码（就是 miIO.ir_play 要的那个 code）
+ *
+ * 这条路的通用性是**本质的**：不管什么品牌、什么协议、甚至自制红外设备，
+ * 只要能用一个红外遥控器操作，就能学。学完存本地 ⇒ 之后完全离线发射。
+ */
+
+// irLearnTool 让音箱进入学习状态（`ir_learn`）。
+//
+//	{"key":1}   ← 存储槽位，1~1000000
+//
+// 用户在**学习窗口内**（通常十几秒）用原遥控器对着音箱按一下要学的键，
+// 然后调 `ir_read` 取回码。两次调用之间的"人去按遥控器"无法自动完成，
+// 所以这是一个人机配合的两步流程 —— 但对用户是**一次性的**：
+// 学完就能一直离线用。
+func irLearnTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
+	var in struct {
+		Key int `json:"key"`
+	}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &in)
+	}
+	if in.Key <= 0 {
+		in.Key = 1
+	}
+	blaster, token, berr := blasterDevice(ctx)
+	if berr != nil {
+		return nil, berr
+	}
+	env, err := miioExchangeWith(ctx, blaster, token, "miIO.ir_learn",
+		map[string]any{"key": strconv.Itoa(in.Key)}, miioExchangeOptions{Attempts: 1})
+	if err != nil {
+		return nil, fmt.Errorf("音箱未接受学习请求：%w", err)
+	}
+	if code, ok := env["code"].(float64); ok && int(code) != 0 {
+		return nil, fmt.Errorf("音箱拒绝进入学习（code=%d）", int(code))
+	}
+	return json.Marshal(map[string]any{
+		"learning": true, "key": in.Key, "via": blaster.Name,
+		"instruction": "音箱已进入学习状态。请在十几秒内，用**原遥控器**对着音箱按下要学的那个键，" +
+			"然后立即调用 ir_read 取回码。",
+	})
+}
+
+// irReadTool 读回学习到的红外码（`ir_read`），并可直接存成具名按键。
+//
+//	{"key":1,"save_as":"tv_power"}   ← save_as 可选
+func irReadTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
+	var in struct {
+		Key    int    `json:"key"`
+		SaveAs string `json:"save_as"`
+	}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &in)
+	}
+	if in.Key <= 0 {
+		in.Key = 1
+	}
+	blaster, token, berr := blasterDevice(ctx)
+	if berr != nil {
+		return nil, berr
+	}
+	env, err := miioExchangeWith(ctx, blaster, token, "miIO.ir_read",
+		map[string]any{"key": strconv.Itoa(in.Key)}, miioExchangeOptions{Attempts: 1})
+	if err != nil {
+		return nil, fmt.Errorf("读码失败（可能还没学到）：%w", err)
+	}
+	if code, ok := env["code"].(float64); ok && int(code) != 0 {
+		// -5002 = 该槽位还没码；-5003 = 学习超时
+		return nil, fmt.Errorf("没有读到码（code=%d；-5002=该槽位无码，-5003=学习超时）", int(code))
+	}
+	learned, _ := env["code_str"].(string)
+	if learned == "" {
+		if v, ok := env["code"].(string); ok {
+			learned = v
+		}
+	}
+	// 小米把码放在 result["code"]，但我们的框架把 numeric code 也放在同一键，
+	// 所以再兜一层：从 result 原始 map 里找字符串型 code。
+	if learned == "" {
+		if res, ok := env["result"].(map[string]any); ok {
+			if v, ok2 := res["code"].(string); ok2 {
+				learned = v
+			}
+		}
+	}
+	if learned == "" {
+		return json.Marshal(map[string]any{
+			"read": false,
+			"note": "设备回了响应但没带 code 字段；原始响应见 raw",
+			"raw":  env,
+		})
+	}
+	out := map[string]any{
+		"read": true, "key": in.Key, "code": learned,
+		"code_bytes": len(learned), "via": blaster.Name,
+	}
+	if strings.TrimSpace(in.SaveAs) != "" {
+		c := loadIRCache(ctx)
+		if c.Entries == nil {
+			c.Entries = map[string]map[string]irPattern{}
+		}
+		if c.Learned == nil {
+			c.Learned = map[string]string{}
+		}
+		c.Learned[in.SaveAs] = learned
+		saveIRCache(ctx, c)
+		out["saved_as"] = in.SaveAs
+	}
+	return json.Marshal(out)
 }
