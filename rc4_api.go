@@ -92,7 +92,84 @@ func apiPostRC4Guest(ctx *plugin.Context, sessionID, ssecurity, apiURL, data str
 // 旧版 protocolClient 对每个请求（含 device_list）都带 deviceId/sdkVersion；
 // 新版探针之前没带，小米会以 401 拒绝已换到的 serviceToken。deviceID 为空时
 // 保持旧行为（历史调用点不受影响）。
+/*
+ * apiPostRC4GuestDevice 是所有云端调用的唯一出口（设备列表、prop/get、prop/set、action）。
+ *
+ * ★★★ 2026-11-17（用户「没有提示过期重新登录啊」）：
+ *
+ * 小米的 **serviceToken 会过期**，过期后云端一律拒绝：
+ * `SERVICETOKEN_EXPIRED`。而本插件此前**从不刷新它** —— 一旦过期，
+ * 同步、控制、状态读取全部失败，只能靠用户重新登录。
+ * 界面上还显示"就绪"（因为会话材料本身能解开），这就是用户看到的矛盾。
+ *
+ * 参考实现的做法（hass-xiaomi-miot `async_check_auth`）：
+ * 检测到 token 过期 → `async_relogin()` 用缓存的 passToken 自动重登 → 重试原请求。
+ * 本插件其实**已经有**那条流程（`refreshPairedMaterial`：step1 + sts location），
+ * 只是云同步路径从来不调用它。
+ *
+ * 现在：过期时用 passToken 静默刷新一次并重试；刷新也失败才把错误抛给上层
+ * （那时账号状态会变成「登录已过期，请重新登录」）。
+ */
 func apiPostRC4GuestDevice(ctx *plugin.Context, sessionID, ssecurity, deviceID, apiURL, data string) ([]byte, error) {
+	if ssecurity == "" {
+		return nil, errors.New("缺少 ssecurity")
+	}
+	raw, err := apiPostRC4GuestDeviceOnce(ctx, sessionID, ssecurity, deviceID, apiURL, data)
+	if err == nil || !isServiceTokenExpired(err) {
+		return raw, err
+	}
+	// serviceToken 过期：用 passToken 静默换新票据，然后重试一次。
+	fresh, rerr := refreshCloudTokens(ctx, sessionID, deviceID)
+	if rerr != nil || fresh == "" {
+		ctx.LogWarn("hx-mi 服务票据刷新失败（需要重新登录）：%v", rerr)
+		return raw, err
+	}
+	ctx.LogWarn("hx-mi 服务票据已过期，已用 passToken 自动刷新并重试")
+	return apiPostRC4GuestDeviceOnce(ctx, sessionID, fresh, deviceID, apiURL, data)
+}
+
+// isServiceTokenExpired 判断错误是否是"服务票据过期"（需要刷新/重登）。
+func isServiceTokenExpired(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToUpper(err.Error())
+	return strings.Contains(msg, "SERVICETOKEN") ||
+		strings.Contains(msg, "SERVICE_TOKEN") ||
+		strings.Contains(msg, "AUTH_ERR") ||
+		strings.Contains(msg, "登录已过期")
+}
+
+// refreshCloudTokens 用保险库里的 passToken 换新 (ssecurity, serviceToken) 并落库。
+//
+// 复用登录流程里已验证过的 refreshPairedMaterial（step1 serviceLogin + sts location），
+// 它从 vault 读 passToken 自建 Cookie 头，**不依赖用户在场**。
+func refreshCloudTokens(ctx *plugin.Context, sessionID, deviceID string) (string, error) {
+	ssec, _, err := refreshPairedMaterial(ctx, sessionID, deviceID)
+	if err != nil {
+		return "", err
+	}
+	if ssec == "" {
+		return "", errors.New("刷新后 ssecurity 为空")
+	}
+	// 把新 ssecurity 写回会话材料，否则下次调用还是旧的。
+	mat, _, oerr := ctx.VaultBlobOpen("xiaomi_session_material")
+	if oerr == nil {
+		var m cloudSecretMaterial
+		if json.Unmarshal(mat, &m) == nil {
+			m.Ssecurity = ssec
+			if b, merr := json.Marshal(m); merr == nil {
+				if _, serr := ctx.VaultBlobSeal("xiaomi_session_material", b); serr != nil {
+					ctx.LogWarn("hx-mi 刷新后的 ssecurity 落库失败（本次仍可用）：%v", serr)
+				}
+			}
+		}
+	}
+	return ssec, nil
+}
+
+// apiPostRC4GuestDeviceOnce 是原来的单次实现（重试逻辑在外面）。
+func apiPostRC4GuestDeviceOnce(ctx *plugin.Context, sessionID, ssecurity, deviceID, apiURL, data string) ([]byte, error) {
 	if ssecurity == "" {
 		return nil, errors.New("缺少 ssecurity")
 	}

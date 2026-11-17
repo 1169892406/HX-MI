@@ -485,7 +485,32 @@ func cloudSessionUsable(ctx *plugin.Context) (bool, string) {
 	if _, _, err := ctx.VaultBlobOpen(saved.SecretRef); err != nil {
 		return false, "会话密钥不可解：" + err.Error()
 	}
+	/*
+	 * ★ 2026-11-17（用户「没有提示过期重新登录啊」）：材料能解开 ≠ 票据还能用。
+	 *
+	 * 小米的 serviceToken 会过期，过期后云端一律拒绝（SERVICETOKEN_EXPIRED）。
+	 * 只看"保险库能解出密钥"会让界面一直显示「就绪」，而实际同步/控制全失败。
+	 *
+	 * 这里再看一眼**最近一次同步的结果**：如果它因票据过期失败，就如实报出来。
+	 * （自动刷新在 apiPostRC4GuestDevice 里已经做了；走到这里说明刷新也没成功，
+	 * 那就真的需要用户重新登录。）
+	 */
+	if st := loadSyncState(ctx); isServiceTokenExpiredString(st.LastError) {
+		return false, "服务票据已过期：" + st.LastError
+	}
 	return true, ""
+}
+
+// isServiceTokenExpiredString 是 isServiceTokenExpired 的字符串版（供状态判据用）。
+func isServiceTokenExpiredString(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	u := strings.ToUpper(msg)
+	return strings.Contains(u, "SERVICETOKEN") ||
+		strings.Contains(u, "SERVICE_TOKEN") ||
+		strings.Contains(u, "AUTH_ERR") ||
+		strings.Contains(msg, "登录已过期")
 }
 
 func registerAutoSyncSchedule(ctx *plugin.Context, intervalSec int) error {
