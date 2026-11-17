@@ -135,6 +135,14 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 	}); err != nil {
 		return err
 	}
+	/*
+	 * 启用即按**本地登记表**宣布设备（2026-11-17）。
+	 *
+	 * 设备注册此前只发生在云同步里 ⇒ 云会话过期时平台注册表为空，连局域网
+	 * 设备的命令都会被拒（「设备未注册」）。这里先离线宣布一次，
+	 * 让"账号过期不影响设备控制"成立；在线状态随后由局域网探测纠正。
+	 */
+	announceLocalDevices(ctx, nil)
 	return ctx.BackgroundRegister(plugin.BackgroundRegisterRequest{Name: "catalog-refresh", IntervalMS: 30 * 24 * 3600 * 1000, Immediate: false})
 }
 
@@ -149,6 +157,17 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		tool != "logout" && tool != "sync_now" && tool != "account_delete" {
 		consumePendingAutoSync(ctx)
 	}
+	/*
+	 * 局域网探测的消费点（2026-11-17）。
+	 *
+	 * lan-health tick 只置位（避免在 tick 里做 UDP 重活），真正探测在这里做 ——
+	 * 此刻持有实例锁，可以安全发 host_call。探测结果会**更新设备可用性**并
+	 * 用本地登记表重新宣布，因此"设备在不在局域网"不再依赖云端。
+	 *
+	 * 对**所有**工具都消费（包括 sync_now/accounts）：这不是改凭据的活，
+	 * 而且用户打开配置页时最需要看到最新的在线状态。
+	 */
+	consumePendingLanProbe(ctx)
 	switch tool {
 	case "regions":
 		return json.Marshal(map[string]any{"regions": []map[string]any{{"id": "cn", "name": "中国大陆", "enabled": true}}})

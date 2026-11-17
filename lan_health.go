@@ -170,3 +170,75 @@ func consumePendingAutoSync(ctx *plugin.Context) {
 	b, _ := json.Marshal(summary)
 	ctx.Log(0, "hx-mi auto sync ok: "+string(b))
 }
+
+// consumePendingLanProbe 在下次工具调用时把"该探一次局域网了"落实（2026-11-17）。
+//
+// # 为什么必须有这个消费点
+//
+// `main.go` 的 lan-health tick 只 `lanProbePending.Store(true)`，而**全仓没有
+// 任何地方读它** —— 也就是说局域网探测从来没真正跑过：`probeAllLanDevices`
+// 只把结果写进插件内存表 `lanHealthTable`，既不 announce 也不上报可用性。
+// 于是平台看到的在线/离线**完全来自云端同步**：云会话一过期，连"这台设备还在
+// 不在局域网里"都判断不了。
+//
+// # 为什么不在 tick 里直接探
+//
+// `probeAllLanDevices` 对每台设备发 UDP hello 并等最多 2 秒；设备多时累计十几秒，
+// 会把宿主调度循环卡住（main.go 的注释已经踩过这个坑）。所以：tick 只置位，
+// 在**下一次工具调用**里做 —— 此刻我们持有该 wasm 实例锁，可以安全地发 host_call。
+func consumePendingLanProbe(ctx *plugin.Context) {
+	if !lanProbePending.CompareAndSwap(true, false) {
+		return
+	}
+	announceLocalDevices(ctx, probeAllLanDevices(ctx))
+}
+
+// announceLocalDevices 用**本地登记表**（devices.json）宣布设备，不依赖云会话。
+//
+// # 为什么需要它
+//
+// 设备注册（DeviceAnnounce）此前只发生在 `syncCloudDevices` 的云端循环里。
+// 于是**云会话过期 ⇒ 一台设备都不宣布 ⇒ 平台注册表为空 ⇒ 连局域网设备的命令
+// 都被平台以「设备未注册」拒掉**（实测：`设备 "266363830" 未注册`）。
+// 用户要的是「账号过期不影响设备控制」，那就不能把注册绑在云上。
+//
+// # 能力从哪来
+//
+// 本地登记表里已经有 `capabilities`（云端同步时写下的）与 `model`；
+// 规格（含中文名）也早已缓存在 spec-cache。所以这里可以完全离线地投影出
+// 与在线时**同样的**能力与控件清单。
+//
+// `availability` 由调用方给（局域网探测结果）；nil 表示"未知"，沿用
+// 上次已知值（首次给 true —— 宁可先显示在线再被探测纠正，也不要让全部设备
+// 因为一次云故障集体变离线）。
+func announceLocalDevices(ctx *plugin.Context, availability map[string]lanHealthEntry) {
+	ds, err := loadDeviceRegistry(ctx)
+	if err != nil || len(ds) == 0 {
+		return
+	}
+	announced := 0
+	for _, d := range ds {
+		avail := true
+		if availability != nil {
+			if e, ok := availability[d.ExternalID]; ok {
+				avail = e.Reachable
+			}
+		}
+		if err := ctx.DeviceAnnounce(plugin.DeviceAnnounceRequest{
+			ExternalID:   d.ExternalID,
+			Name:         d.Name,
+			Vendor:       "xiaomi",
+			Model:        d.Model,
+			Capabilities: d.Capabilities,
+			Available:    &avail,
+			Attributes:   map[string]any{"controls": specControls(ctx, d.Model)},
+		}); err != nil {
+			ctx.LogWarn("hx-mi 本地宣布设备失败（device=%s）：%v", d.ExternalID, err)
+			continue
+		}
+		announced++
+	}
+	if announced > 0 {
+		ctx.LogWarn("hx-mi 已用本地登记表宣布 %d 台设备（不依赖云会话）", announced)
+	}
+}
