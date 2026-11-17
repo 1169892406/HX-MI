@@ -452,12 +452,21 @@ func lanDiagnoseTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage
 				 * 现在探它的**参数结构**：不同残缺组合如果回不同错误，
 				 * 就能反推出它要哪些字段。残缺参数不会被当成有效码发射。
 				 */
-				{"miIO.ir_play", []any{}},
-				{"miIO.ir_play", map[string]any{}},
-				{"miIO.ir_play", map[string]any{"ir_code": "probe"}},
-				{"miIO.ir_play", map[string]any{"dev_key": "probe", "ir_code": "probe"}},
-				{"miIO.ir_play", map[string]any{"key_id": "probe"}},
-				{"miIO.ir_play", map[string]any{"dev_key": "probe", "key_id": "probe"}},
+				/*
+				 * `miIO.ir_play` 的**正确参数格式**（2026-11-17 联网查证）：
+				 *   {"freq": 38400, "code": "<base64 红外码>"}
+				 * 来源：小米设备社区实测记录，与 `ChuangmiIr.play(code)` 同一套 IR 码。
+				 * 我此前猜的 `dev_key`+`ir_code` 是错的 ⇒ 所以一直回
+				 * `code:-10000 general error`（参数名不对，不是方法不存在）。
+				 *
+				 * 探测仍用**空/无效码**，不会真发射：
+				 *   code:""     → 应为"参数为空"类错误
+				 *   code:"AAAA" → 3 字节，远短于合法 IR 帧，设备应拒绝
+				 * 若错误与 -10000 不同，即证明字段名对了。
+				 */
+				{"miIO.ir_play {freq+空code}", map[string]any{"freq": 38400, "code": ""}},
+				{"miIO.ir_play {freq+AAAA}", map[string]any{"freq": 38400, "code": "AAAA"}},
+				{"miIO.ir_play {code:AAAA}", map[string]any{"code": "AAAA"}},
 			}
 			for _, m := range candidates {
 				_, e := miioExchangeWith(ctx, d, token, m.name, m.params,
@@ -496,4 +505,86 @@ func shortErr(err error) string {
 		msg = msg[:120] + "…"
 	}
 	return msg
+}
+
+// cloudIRProbeTool 探测小米云端是否提供**红外码下载**接口（`ir_probe`，只读）。
+//
+// # 为什么需要（2026-11-17 用户「这个是通用插件啊，我可以别人可以吗」）
+//
+// 已经证明音箱支持局域网发射（`miIO.ir_play` 存在），但缺 `dev_key` + `ir_code`。
+// 抓包能拿到，但那只对本人有效 —— **通用插件不能要求每个用户抓包**。
+// 所以必须找到"登录后自动取码"的云接口：
+//   ① 取到码 → 缓存本地 → 之后离线可用（对所有人都成立）；
+//   ② 取不到 → 红外只能走云端 action（参考实现也是这么做的）。
+//
+// 这里只发**查询类**请求（不同 payload 试同一批候选路径），不改变任何设备状态。
+func cloudIRProbeTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
+	var in struct {
+		ExternalID string `json:"external_id"`
+	}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &in)
+	}
+	ds, err := loadDeviceRegistry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 默认取第一台 miir 设备（红外遥控器）
+	target := ""
+	for _, d := range ds {
+		if strings.HasPrefix(d.Model, "miir.") && (in.ExternalID == "" || d.ExternalID == in.ExternalID) {
+			target = d.ExternalID
+			break
+		}
+	}
+	if target == "" {
+		return json.Marshal(map[string]any{"error": "没有找到 miir.* 红外遥控设备"})
+	}
+
+	sessionID, ssecurity, deviceID, serr := openCloudSession(ctx)
+	if serr != nil {
+		return json.Marshal(map[string]any{"error": "无云会话：" + serr.Error()})
+	}
+	defer func() { _ = ctx.HTTPClose(sessionID) }()
+
+	// 候选：路径 × payload 形状。只取回显，判断哪个有戏。
+	candidates := []struct {
+		path string
+		body any
+	}{
+		/*
+		 * 2026-11-17 联网查证后扩充：mi-cli 的红外能力清单里出现
+		 * `ir_get_keys`（取按键列表）与 `ir_press_key`（发按键），参数用
+		 * `controller_id` / `did` + `parent_did`（代发红外的音箱）。
+		 * 全部只读查询，不会触发发射。
+		 */
+		{"/app/ir/get_rcode", map[string]any{"did": target}},
+		{"/app/ir/get_keys", map[string]any{"did": target}},
+		{"/app/ir/get_keys", map[string]any{"controller_id": target}},
+		{"/app/ir/key_list", map[string]any{"did": target}},
+		{"/app/ir/get_rcode_list", map[string]any{"dids": []string{target}}},
+		{"/app/home/ir/get_keys", map[string]any{"did": target}},
+	}
+	results := make([]map[string]any, 0, len(candidates))
+	for _, c := range candidates {
+		body, _ := json.Marshal(c.body)
+		raw, rerr := apiPostRC4GuestDevice(ctx, sessionID, ssecurity, deviceID,
+			"https://api.io.mi.com"+c.path, string(body))
+		entry := map[string]any{"path": c.path, "body": string(body)}
+		if rerr != nil {
+			// 4xx/5xx 的响应体里也常有 code/message，尽量带出来
+			entry["error"] = shortErr(rerr)
+			results = append(results, entry)
+			continue
+		}
+		// RC4 响应是加密的，这里只报长度与前若干字符（不含凭据）
+		s := string(raw)
+		if len(s) > 300 {
+			s = s[:300] + "…"
+		}
+		entry["resp_len"] = len(raw)
+		entry["resp"] = s
+		results = append(results, entry)
+	}
+	return json.Marshal(map[string]any{"external_id": target, "probes": results})
 }

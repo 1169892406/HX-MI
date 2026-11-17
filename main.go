@@ -422,6 +422,10 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		return buildAccountView(ctx)
 	case "settings":
 		return applySyncSettingsTool(ctx, args)
+	case "ir_lib":
+		return irLibTool(ctx, args)
+	case "ir_send":
+		return irSendTool(ctx, args)
 	case "cred_check":
 		return credCheckTool(ctx)
 	case "ir_probe":
