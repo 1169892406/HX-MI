@@ -114,18 +114,23 @@ func apiPostRC4GuestDevice(ctx *plugin.Context, sessionID, ssecurity, deviceID, 
 	if ssecurity == "" {
 		return nil, errors.New("缺少 ssecurity")
 	}
-	raw, err := apiPostRC4GuestDeviceOnce(ctx, sessionID, ssecurity, deviceID, apiURL, data)
-	if err == nil || !isServiceTokenExpired(err) {
-		return raw, err
-	}
-	// serviceToken 过期：用 passToken 静默换新票据，然后重试一次。
-	fresh, rerr := refreshCloudTokens(ctx, sessionID, deviceID)
-	if rerr != nil || fresh == "" {
-		ctx.LogWarn("hx-mi 服务票据刷新失败（需要重新登录）：%v", rerr)
-		return raw, err
-	}
-	ctx.LogWarn("hx-mi 服务票据已过期，已用 passToken 自动刷新并重试")
-	return apiPostRC4GuestDeviceOnce(ctx, sessionID, fresh, deviceID, apiURL, data)
+	/*
+	 * ⚠⚠ 这里**故意不做自动刷新**（2026-11-17 事故后移除）。
+	 *
+	 * 曾经实现过"检测到 SERVICETOKEN_EXPIRED → 用 passToken 换票 → 重试"，
+	 * 结果**把本来可用的会话搞坏了**：
+	 *
+	 *   step1 能拿到新的 `ssecurity`，但与之配对的 `serviceToken` 是通过
+	 *   sts 重定向下发的 Set-Cookie —— 宿主 HTTP 客户端在中间响应里就消费掉了，
+	 *   插件侧读不到（实测响应头只有 Connection/Content-Length/Content-Type/
+	 *   Date/Request-Id/Server，**没有 Set-Cookie**）。于是 jar 里仍是旧
+	 *   serviceToken，而我把新 ssecurity 写回了保险库 ⇒ **两者不配对**，
+	 *   原本还能用的会话被彻底废掉，之后所有云端调用都报 SERVICETOKEN_EXPIRED。
+	 *
+	 * 教训：**没有能力验证配对成功时，宁可不刷新**。刷新交给用户重新登录（可靠），
+	 * 过期前由 `cloudSessionUsable` 的 9 小时判据主动提醒。
+	 */
+	return apiPostRC4GuestDeviceOnce(ctx, sessionID, ssecurity, deviceID, apiURL, data)
 }
 
 // isServiceTokenExpired 判断错误是否是"服务票据过期"（需要刷新/重登）。
@@ -259,7 +264,21 @@ func apiPostRC4GuestDeviceOnce(ctx *plugin.Context, sessionID, ssecurity, device
 		}
 		return nil, errors.New("业务接口返回未加密 JSON，拒绝作为成功响应")
 	}
-	return decryptRC4Text(signed, text)
+	out, derr := decryptRC4Text(signed, text)
+	if derr != nil {
+		/*
+		 * 诊断容错（2026-11-17）：响应既不是明文 JSON 也不是合法 base64，
+		 * 说明命中的是**不存在的路径**或非 API 端点（404 文本/HTML）。
+		 * 把原文带出来才能判断接口不存在还是接口存在但没权限，
+		 * 否则永远只看到 illegal base64 这种无用信息。
+		 */
+		snip := text
+		if len(snip) > 200 {
+			snip = snip[:200] + "…"
+		}
+		return nil, fmt.Errorf("响应既非 JSON 也非 base64（%v）；原文前 200 字：%s", derr, snip)
+	}
+	return out, nil
 }
 func decryptRC4Bytes(signed string, cipherBytes []byte) ([]byte, error) {
 	key, e := base64.StdEncoding.DecodeString(signed)
