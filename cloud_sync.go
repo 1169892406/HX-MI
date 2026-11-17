@@ -698,6 +698,37 @@ func specControls(ctx *plugin.Context, model string) []map[string]any {
 			})
 		}
 	}
+	/*
+	 * 同名控件加**服务名前缀**消歧（2026-11-17）。
+	 *
+	 * 实测台灯的两个 switch 都显示「开关」——`switch_on`（主开关）与
+	 * `indicator_light_on`（指示灯）在中文翻译里都叫"开关"，用户根本分不清
+	 * 点哪个会关灯、点哪个只会关指示灯。
+	 *
+	 * 参考实现（HA）的显示是「麦克风 静音」「智能音箱 睡眠模式」——
+	 * 即 **服务名 + 属性名**。这里只对**重名**的加前缀，避免所有控件都变长：
+	 *
+	 *	台灯：  开关 → 「开关」，指示灯 → 「指示灯 开关」
+	 *	音箱：  静音 → 「静音」，麦克风 → 「麦克风 静音」
+	 */
+	count := map[string]int{}
+	for _, c := range out {
+		if n, _ := c["name"].(string); n != "" {
+			count[n]++
+		}
+	}
+	for _, c := range out {
+		n, _ := c["name"].(string)
+		g, _ := c["group"].(string)
+		if n == "" || g == "" || count[n] <= 1 {
+			continue
+		}
+		if g != n {
+			c["name"] = g + " " + n
+			ctx.LogWarn("hx-mi 控件名消歧：%q → %q", n, c["name"])
+		}
+	}
+	ctx.LogWarn("hx-mi specControls 完成：%d 个控件，重名统计=%v", len(out), count)
 	return out
 }
 
