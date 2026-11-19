@@ -331,14 +331,16 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 			}
 			if t, ok := legacyNumber(got["temperature"]); ok && t > -40 && t < 80 {
 				/*
-				 * ⚠ 发 `value` + `unit`，**不是** `temperature`（2026-11-16 核实）。
+				 * ⚠ 统一写 `temperature`（2026-11-19 用户「以本地为准」）。
 				 *
-				 * 前端 `sensorReadouts()` 读的就是这两个属性：
-				 *   readProperty(rows, cap, 'value') / readProperty(rows, cap, 'unit')
-				 * 旧代码按 `temperature` 这类顶层键读，后端也不产出，
-				 * 于是传感器卡永远空着 —— 同一个坑不能在新代码里再踩一次。
+				 * 历史教训：老协议这条路写 `value`，而规格化那条路写 `temperature`，
+				 * 平台状态库是**按属性名合并**的（repo.applyStatePatches 只覆盖同名键，
+				 * 从不删除别的键）⇒ 同一个温度在库里留下两个键，界面上出现
+				 * 「温度 37」和「数值 40」两个数，其中一个还是两天前的残留。
+				 *
+				 * 现在两条本地路径都写 `temperature`（+ `unit`），键名一致就不会再分裂。
 				 */
-				state["sensor"] = map[string]any{"value": t, "unit": "℃"}
+				state["sensor"] = map[string]any{"temperature": t, "unit": "℃"}
 			}
 		} else {
 			ctx.LogWarn("hx-mi 老协议状态回读失败（设备 %s）：%v", d.ExternalID, gerr)
@@ -373,7 +375,8 @@ func handleDriverCommand(ctx *plugin.Context, payload json.RawMessage) error {
 	}
 	// 温度：本机型号规格里的可选属性，读不到就跳过（不拖累命令结果）。
 	if t, ok := readTemperatureProperty(ctx, *d, token); ok {
-		state["sensor"] = map[string]any{"temperature": t}
+		/* 带上 unit，与老协议那条同形（见上面注释：键名必须一致）。 */
+		state["sensor"] = map[string]any{"temperature": t, "unit": "℃"}
 	}
 	if len(state) == 0 {
 		return nil
@@ -837,7 +840,15 @@ func cloudReadSensorState(ctx *plugin.Context, sessionID, ssecurity, deviceID, d
 		}
 		switch {
 		case r.SIID == 2 && r.PIID == 1:
-			out["sensor"] = map[string]any{"value": num, "unit": "℃"}
+			/*
+			 * 云端正名 `temperature`（2026-11-19 与两条本地路径对齐）。
+			 *
+			 * 这条路只走 **BLE 传感器**（没有局域网 IP，云端是唯一来源，见
+			 * cloud_sync.go 的 `LocalIP == "" && model 含 sensor` 判据），
+			 * 所以"以本地为准"在这里不冲突：能本地读的设备根本进不到这里。
+			 * 键名与本地一致，同一个量才不会在库里出现两个键。
+			 */
+			out["sensor"] = map[string]any{"temperature": num, "unit": "℃"}
 		case r.SIID == 2 && r.PIID == 2:
 			if s, ok := out["sensor"].(map[string]any); ok {
 				s["humidity"] = num
@@ -926,10 +937,34 @@ func cloudRequestMIoTSpec(ctx *plugin.Context, sessionID, ssecurity, deviceID, a
 	if err != nil {
 		return nil, err
 	}
-	raw, err := apiPostRC4GuestDevice(ctx, sessionID, ssecurity, deviceID,
-		"https://api.io.mi.com/app/miotspec/"+api, string(body))
-	if err != nil {
-		return nil, err
+	/*
+	 * ★★ 2026-11-19（用户「设备不能控制」真机日志：`switch turn_on result=error
+	 *   latency=1124263ms`）：这条云请求**没有任何超时** —— 设备/云端不响应时
+	 *   调用会一直挂着，平台只能等自己那侧超时（十几分钟），用户看到的是"点了没反应"。
+	 *
+	 *   这里在**插件内**加有界等待（标准做法，不动平台代码）：
+	 *   超时立刻返回明确错误，界面马上拿到"无响应/离线"而不是无限转圈。
+	 */
+	const specWriteTimeout = 12 * time.Second
+	type specResp struct {
+		raw []byte
+		err error
+	}
+	done := make(chan specResp, 1)
+	go func() {
+		r, e := apiPostRC4GuestDevice(ctx, sessionID, ssecurity, deviceID,
+			"https://api.io.mi.com/app/miotspec/"+api, string(body))
+		done <- specResp{raw: r, err: e}
+	}()
+	var raw []byte
+	select {
+	case v := <-done:
+		raw, err = v.raw, v.err
+		if err != nil {
+			return nil, err
+		}
+	case <-time.After(specWriteTimeout):
+		return nil, fmt.Errorf("设备无响应：%.0f 秒内未返回（可先确认设备在线/同一局域网）", specWriteTimeout.Seconds())
 	}
 	/*
 	 * `result` 的形状**按 api 而不同**（2026-11-17 实测）：
@@ -1357,6 +1392,25 @@ func hasSpecDrivenCap(caps []string, cmd miioCommand) bool {
 	cap := strings.ToLower(cmd.Capability)
 	if cap == "button" || cap == "number" {
 		return true
+	}
+	/*
+	 * ★ 2026-11-18：**非主开关的 switch 实例**（指示灯 / 麦克风静音 / 睡眠模式…）
+	 * 也必须走规格驱动，否则控制会打错地方。
+	 *
+	 * 事故（用户：「同一个能力多个开关有问题，插件侧测试控制 OK，页面用不了」）：
+	 * 台灯的规格里有两个 bool 属性 —— service 2 的主开关 `on`、
+	 * service 3 的指示灯 `indicator_light_on`。插件把它们投影成两个 switch 实例
+	 * （`switch` / `indicator_light_on`），平台各画一个开关。
+	 * 但 `mapControl` 的 turn_on/turn_off 是**硬编码 siid 2 / piid 1** 的，
+	 * 于是指示灯那颗开关实际去控制主灯 —— 表现就是「点这个开关，亮的却是另一个」。
+	 *
+	 * 判据：主开关的实例名与能力同名（投影时特意还原成 `switch`，为的是和
+	 * 状态行的 instance_id 对齐），其余实例名形如 `服务名_属性名`。
+	 * 主开关继续走 set_power 快路径（快且不需要读规格），其余走规格写入。
+	 */
+	if cap == "switch" {
+		inst := strings.ToLower(strings.TrimSpace(commandInstanceID(cmd)))
+		return inst != "" && inst != cap
 	}
 	return false
 }
