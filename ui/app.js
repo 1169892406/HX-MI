@@ -61,6 +61,8 @@
   /* 设备管理选中态与过滤 */
   var devSelDid = '';
   var devFilterAccount = '';
+  /* 局域网检查列表的账号过滤（2026-11-20 用户要求） */
+  var healthFilterAccount = '';
   /* 同步表当前展开编辑条的账号 id */
   var openEditId = '';
 
@@ -389,12 +391,6 @@
     fillDevHousehold();
     // 添加任务表单的默认值
     fillAddTaskDefaults();
-    var note = el('addsync-note');
-    if (note) {
-      note.textContent = household
-        ? '同步任务绑定到当前家庭「' + household.name + '」；同一账号可换绑或解绑。'
-        : '平台尚未提供家庭信息，暂时无法绑定家庭。';
-    }
   }
 
   /*
@@ -406,8 +402,6 @@
    *     「登录已过期，请重新登录」并给出「重新登录」入口
    */
   function applyTokenLinkage(savePw) {
-    var risk = el('token-risk');
-    if (risk) risk.hidden = !savePw;
     var sw = el('sw-polling');
     var row = el('polling-row');
     if (sw) {
@@ -570,6 +564,21 @@
         t.appendChild(b);
         t.appendChild(meta);
         row.appendChild(t);
+
+        /*
+         * Token 状态（2026-11-20 用户要求在账号列显示票据信息）。
+         * 小米不给 serviceToken 有效期（票据寿命不可预估），如实可给的是
+         * 票据最近一次签发/自动续期的时间（saved_at，登录与自动重登都会刷新）。
+         * 会话是单份的、属于当前登录账号 —— 只显示在对应行，不冒充别的账号。
+         * 是否真的过期以状态 pill（真实探针结论）为准。
+         */
+        if (data.token_updated_at && data.token_account && name === data.token_account) {
+          var tok = document.createElement('span');
+          tok.className = 'acct__token';
+          tok.textContent = 'Token 更新于 ' + fmtDateTime(data.token_updated_at);
+          tok.setAttribute('title', '票据最近一次签发/自动续期的时间。小米不提供有效期，是否过期以状态为准；开启自动续期后过期会自动重登并刷新此时间。');
+          row.appendChild(tok);
+        }
 
         var spacer = document.createElement('span');
         spacer.className = 'spacer';
@@ -1301,6 +1310,19 @@
   function renderDevices() {
     var sync = (syncView && syncView.sync) || {};
     var list = sync.device_list || [];
+    /*
+     * 按账号过滤（2026-11-20 用户要求）：后端给每台设备带了同步来源账号
+     * （sync.device_list[].account）。选中账号后只显示该账号的设备；
+     * 统计磁贴保持全局口径（描述最近一次同步的整体结果，不随筛选变化）。
+     */
+    if (devFilterAccount) {
+      var selName = accountNamesCache[devFilterAccount] || '';
+      var fList = [];
+      for (var fi = 0; fi < list.length; fi++) {
+        if ((list[fi] && list[fi].account) === selName) fList.push(list[fi]);
+      }
+      list = fList;
+    }
 
     var tiles = el('res-tiles');
     tiles.innerHTML = '';
@@ -1340,7 +1362,9 @@
     if (!list.length) {
       var p = document.createElement('p');
       p.className = 'muted small';
-      p.textContent = '暂无同步设备。手动同步一次后这里会列出云端返回的设备。';
+      p.textContent = devFilterAccount
+        ? '所选账号在最近一次同步结果里没有设备。'
+        : '暂无同步设备。手动同步一次后这里会列出云端返回的设备。';
       listBox.appendChild(p);
     } else {
       var selOk = false;
@@ -1556,13 +1580,34 @@
   function renderHealth(data) {
     var box = el('health-table');
     if (!box) return;
-    var list = (data && data.devices) || [];
+    fillHealthFilters();
+    var all = (data && data.devices) || [];
+    /*
+     * 按账号过滤（2026-11-20 用户要求：局域网检查列表与同步结果一样，
+     * 多账号时按账号筛）。设备行的 account 是同步来源账号（登记戳）。
+     */
+    var selName = healthFilterAccount ? (accountNamesCache[healthFilterAccount] || '') : '';
+    var list = all;
+    if (selName) {
+      list = [];
+      for (var fi = 0; fi < all.length; fi++) {
+        if ((all[fi] && all[fi].account) === selName) list.push(all[fi]);
+      }
+    }
     box.innerHTML = '';
-    if (!list.length) {
+    if (!all.length) {
       var p = document.createElement('p');
       p.className = 'muted small';
       p.textContent = '暂无设备。';
       box.appendChild(p);
+      scheduleHeight();
+      return;
+    }
+    if (!list.length) {
+      var pe = document.createElement('p');
+      pe.className = 'muted small';
+      pe.textContent = '所选账号没有健康检查数据（该账号的设备尚未同步进本机登记）。';
+      box.appendChild(pe);
       scheduleHeight();
       return;
     }
@@ -1581,6 +1626,7 @@
       var pathText = (d.path || '—') + (d.path_detail ? ' · ' + d.path_detail : '');
       html += '<tr>' +
         '<td><span class="hname">' + esc(d.name) + '</span>' +
+        (d.account ? '<span class="hsub">' + esc(d.account) + '</span>' : '') +
         (d.path_detail ? '<span class="hsub">' + esc(d.path_detail) + '</span>' : '') + '</td>' +
         '<td><span class="hver">' + esc(d.model) + '</span></td>' +
         '<td><span class="hver">' + esc(d.version || '-') + '</span></td>' +
@@ -1592,6 +1638,46 @@
     html += '</tbody></table>';
     box.innerHTML = html;
     scheduleHeight();
+  }
+
+  /*
+   * 健康表过滤下拉（2026-11-20 用户要求：局域网检查也要有账号/家庭筛选）。
+   * 与设备管理同一套选项；选择保存在 healthFilterAccount，renderHealth 按它过滤。
+   */
+  function fillHealthFilters() {
+    var accSel = el('f-health-account');
+    if (accSel) {
+      accSel.innerHTML = '';
+      var allOpt = document.createElement('option');
+      allOpt.value = '';
+      allOpt.textContent = '全部账号';
+      accSel.appendChild(allOpt);
+      accountsCache.forEach(function (a) {
+        var id = a.account_id || '';
+        var opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = accountNamesCache[id] || a.masked_account || id;
+        accSel.appendChild(opt);
+      });
+      accSel.value = healthFilterAccount || '';
+    }
+    var hh = el('f-health-household');
+    if (hh) {
+      hh.innerHTML = '';
+      if (household) {
+        var o = document.createElement('option');
+        o.value = household.id;
+        o.textContent = household.name;
+        hh.appendChild(o);
+        hh.value = household.id;
+      } else {
+        var o2 = document.createElement('option');
+        o2.value = '';
+        o2.textContent = '当前家庭';
+        hh.appendChild(o2);
+        hh.value = '';
+      }
+    }
   }
 
   /** 控制通道卡里的局域网状态行：由健康检查结果聚合。 */
@@ -1706,6 +1792,14 @@
     // 健康检查
     var hb = el('btn-health-refresh');
     if (hb) hb.addEventListener('click', function () { loadHealth(); });
+    // 健康表账号过滤（2026-11-20 用户要求：局域网检查列表按账号筛选）
+    var fha = el('f-health-account');
+    if (fha) {
+      fha.addEventListener('change', function () {
+        healthFilterAccount = fha.value;
+        renderHealth(healthCache);
+      });
+    }
   }
 
   var booted = false;

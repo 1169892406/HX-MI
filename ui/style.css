@@ -194,6 +194,11 @@ body {
   display: block; margin-top: 2px; font-size: 12px; color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* Token 状态（2026-11-20 用户要求在账号列显示）：票据最近一次签发/续期时间 */
+.acct__token {
+  flex: none; font-size: 12.5px; color: var(--muted); white-space: nowrap;
+  margin-right: 6px; cursor: help;
+}
 .acct > .spacer { display: none; }
 .acct > .btn, .acct > .pill, .acct > .sw { flex: none; }
 .acct__ops { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
@@ -206,19 +211,6 @@ body {
 .row__main { min-width: 0; }
 .row__main > b { font-size: 13.5px; font-weight: 600; display: block; }
 .row__main > p { margin: 4px 0 0; line-height: 1.55; }
-
-/* 风险提示盒 */
-.riskbox {
-  margin: 10px 0 2px; border: 1px solid var(--warn-line); background: var(--warn-bg);
-  color: var(--warn); border-radius: var(--r-sm); padding: 10px 14px; font-size: 12.5px;
-}
-.riskbox__hd { font-weight: 600; display: flex; align-items: center; gap: 8px; }
-.riskbox__i {
-  width: 16px; height: 16px; border-radius: 50%; background: var(--warn); color: #fff;
-  display: inline-flex; align-items: center; justify-content: center; font-size: 11px; flex: none;
-}
-.riskbox ul { margin: 6px 0 0; padding-left: 18px; }
-.riskbox li { margin: 3px 0; }
 
 /* ── 表单 ─────────────────────────────────────────────── */
 .form { display: flex; flex-direction: column; gap: 12px; }
@@ -278,8 +270,6 @@ body {
 .lanstat--ok   { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-line); }
 .lanstat--warn { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-line); }
 .lanstat--none { color: var(--muted); background: var(--card2); border-color: var(--line); }
-.nohint { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
-
 /* ── 列表切换页签（自动同步 / 局域网检查 并排）────────── */
 .seg {
   display: inline-flex; background: var(--card2); border: 1px solid var(--line);
@@ -343,8 +333,6 @@ body {
   padding-bottom: 12px; border-bottom: 1px solid var(--line);
 }
 .filters .fld { flex: 0 1 200px; }
-.filters__note { margin-bottom: 9px; }
-
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); margin: 14px 0; }
 .stat {
   padding: 4px 16px; border-right: 1px solid var(--line); display: flex;

@@ -31,25 +31,16 @@
       <div id="accounts" class="accounts"><p class="muted">读取中…</p></div>
 
       <!-- Token 自动续期（全插件共享配置；账号行内的开关与这里是同一份状态）。
-           开启后密码进保险库，Token 过期时自动重登；不开启则过期后红外不可控、
-           新增设备无法自动同步 —— 这三条影响必须让用户看见，否则会误以为"插件坏了"。 -->
+           2026-11-20 用户裁定：说明性小字与风险清单删除（页面小字太多、多为
+           重复）—— 开关 title 保留一句「全插件共享设置」。 -->
       <div class="tokenrow">
         <div class="row__main">
           <b>Token 自动续期</b>
-          <p class="muted small">保存账号密码，Token 过期时自动重新登录（全插件共享，各行开关同步显示同一状态）。</p>
         </div>
-        <label class="sw" title="全插件共享设置">
+        <label class="sw" title="保存账号密码，Token 过期时自动重新登录（全插件共享设置）">
           <input type="checkbox" id="f-save-password" checked>
           <span class="sw__ui"></span>
         </label>
-      </div>
-      <div class="riskbox" id="token-risk">
-        <div class="riskbox__hd"><span class="riskbox__i">!</span>开启后账号密码将加密保存在平台保险库，存在安全权衡</div>
-        <ul>
-          <li><b>安全风险</b>：密码保存在服务端，平台被攻破时账号可能泄露，请自行权衡。</li>
-          <li><b>不开启时</b>：Token 失效后<b>红外设备无法控制</b>（红外须经云端发送）。</li>
-          <li><b>不开启时</b>：Token 过期后<b>新增设备无法自动同步</b>，需手动重新登录。</li>
-        </ul>
       </div>
     </div>
 
@@ -142,7 +133,6 @@
         </span>
       </div>
       <div id="lan-status" class="lanstat lanstat--none">⏳ 正在检测局域网状态…</div>
-      <p class="nohint">⏱ 上次探测未返回时<b>跳过本次</b>，不堆叠检测；蓝牙 / Zigbee 设备经网关（音箱）链路读取，同样计入健康检查。</p>
     </div>
   </section>
 
@@ -170,7 +160,6 @@
           </span></label>
         <button type="button" id="btn-add-sync-ok" class="btn btn--primary">添加任务</button>
       </div>
-      <p class="muted small" id="addsync-note"></p>
       <div id="sync-table" class="tscroll"><p class="muted small">读取中…</p></div>
       <div id="res-fail" class="banner banner--warn" hidden></div>
     </div>
@@ -198,7 +187,6 @@
             <select id="f-dev-account"></select></label>
           <label class="fld"><span>家庭</span>
             <select id="f-dev-household"></select></label>
-          <span class="muted small filters__note">设备由家庭级同步会话拉取，暂不按账号拆分归属。</span>
         </div>
         <div id="res-tiles" class="stats"></div>
         <div class="devgrid">
@@ -207,14 +195,20 @@
         </div>
       </div>
 
-      <!-- 页签二：局域网检查列表 -->
+      <!-- 页签二：局域网检查列表（2026-11-20 用户要求：与同步结果一致，
+           挂账号/家庭筛选框 —— 多账号时按账号过滤） -->
       <div id="pane-health" hidden>
         <div class="pane-hd">
           <span class="muted small" id="health-interval-label"></span>
           <span class="spacer"></span>
           <button type="button" id="btn-health-refresh" class="btn btn--primary btn--sm">立即检查</button>
         </div>
-        <p class="sec__d">按设备实际通信路径分别检测：局域网直连 / 网关读取 / 云端下发。单台超时 1.2 秒，上次未返回则跳过本次（不堆叠）。</p>
+        <div class="filters">
+          <label class="fld"><span>所属账号</span>
+            <select id="f-health-account"></select></label>
+          <label class="fld"><span>家庭</span>
+            <select id="f-health-household"></select></label>
+        </div>
         <div id="health-table" class="tscroll"><p class="muted small">读取中…</p></div>
       </div>
     </div>

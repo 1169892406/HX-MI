@@ -24,11 +24,17 @@ type miioDevice struct {
 	Name            string   `json:"name"`
 	Capabilities    []string `json:"capabilities"`
 	NumericDeviceID uint32   `json:"numeric_device_id,omitempty"`
+	// Account 是把这台设备**同步进登记**的账号（2026-11-20 用户要求：局域网
+	// 检查列表按账号过滤 —— 多账号时必须能筛）。单会话设计下它等于"最近一次
+	// 成功同步的会话账号"；换账号重新同步不会清掉旧账号的设备，它们的
+	// Account 保持原值 —— 正因如此过滤才有意义。旧登记没有该字段，解析后
+	// 为空串 ⇒ 前端按"未知来源"处理（不参与过滤），下一次同步会补上。
+	Account string `json:"account,omitempty"`
 }
 type miioCommand struct {
-	ExternalID string         `json:"external_id"`
-	Action     string         `json:"action"`
-	Capability string         `json:"capability"`
+	ExternalID string `json:"external_id"`
+	Action     string `json:"action"`
+	Capability string `json:"capability"`
 	// Params 是插件内部归一化后的参数袋。
 	Params map[string]any `json:"params"`
 	// Args 是宿主 pluginres.CommandRequest 的线上字段（resource_host.go 写
@@ -778,9 +784,10 @@ func encodeBase64(b []byte) string {
 // # 只读这三项
 //
 // `miaomiaoce.sensor_ht.t2` 的规格（本地 spec-cache 核对过）：
-//   siid=2 piid=1 → temperature
-//   siid=2 piid=2 → relative-humidity
-//   siid=3 piid=1 → battery-level
+//
+//	siid=2 piid=1 → temperature
+//	siid=2 piid=2 → relative-humidity
+//	siid=3 piid=1 → battery-level
 //
 // # 上报形状
 //
@@ -820,10 +827,10 @@ func cloudReadSensorState(ctx *plugin.Context, sessionID, ssecurity, deviceID, d
 	}
 	var resp struct {
 		Result []struct {
-			SIID  int   `json:"siid"`
-			PIID  int   `json:"piid"`
-			Value any   `json:"value"`
-			Code  int   `json:"code"`
+			SIID  int `json:"siid"`
+			PIID  int `json:"piid"`
+			Value any `json:"value"`
+			Code  int `json:"code"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -1001,7 +1008,6 @@ func cloudRequestMIoTSpec(ctx *plugin.Context, sessionID, ssecurity, deviceID, a
 	return nil, nil
 }
 
-
 /*
  * 红外遥控：**动作**而不是属性（2026-11-17 按规格核对）。
  *
@@ -1163,7 +1169,6 @@ func hasCap(caps []string, want string) bool {
 	}
 	return false
 }
-
 
 // mediaAcknowledgedVolume 从一条成功的 volume_set 命令里取出"设备已接受的绝对值"。
 //

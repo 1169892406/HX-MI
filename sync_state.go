@@ -40,21 +40,24 @@ type syncDeviceView struct {
 	Online     bool   `json:"online"`
 	Reason     string `json:"reason,omitempty"`
 	ReasonText string `json:"reason_text,omitempty"`
+	// Account 是把这台设备同步进登记的账号（2026-11-20 用户要求按账号过滤）。
+	// 旧快照没有该字段，为空 ⇒ 前端按"未知来源"处理。
+	Account string `json:"account,omitempty"`
 }
 
 // syncStatusView 是 account 工具返回的 sync 块，字段与旧版
 // httpapi.SyncStatusView 逐条对应（含 json 名）。
 type syncStatusView struct {
-	Enabled      bool   `json:"enabled"`
-	Running      bool   `json:"running"`
-	Devices      int    `json:"devices"`
-	Controllable int    `json:"controllable"`
-	Uncontrollable int  `json:"uncontrollable"`
-	DeviceList   []syncDeviceView `json:"device_list,omitempty"`
-	LastOKAt     string `json:"last_ok_at,omitempty"`
-	NextSyncAt   string `json:"next_sync_at,omitempty"`
-	ConsecutiveFailures int `json:"consecutive_failures"`
-	LastError    string `json:"last_error,omitempty"`
+	Enabled             bool             `json:"enabled"`
+	Running             bool             `json:"running"`
+	Devices             int              `json:"devices"`
+	Controllable        int              `json:"controllable"`
+	Uncontrollable      int              `json:"uncontrollable"`
+	DeviceList          []syncDeviceView `json:"device_list,omitempty"`
+	LastOKAt            string           `json:"last_ok_at,omitempty"`
+	NextSyncAt          string           `json:"next_sync_at,omitempty"`
+	ConsecutiveFailures int              `json:"consecutive_failures"`
+	LastError           string           `json:"last_error,omitempty"`
 }
 
 // syncStateRecord 是落盘结构：上次同步结果 + 失败计数。
@@ -179,11 +182,11 @@ func buildAccountView(ctx *plugin.Context) (json.RawMessage, error) {
 		}
 	}
 	out := map[string]any{
-		"state":           state,
+		"state":            state,
 		"relogin_required": state == "auth_rejected",
-		"password_saved":  passwordSavedFlag(ctx),
-		"notice":          credHint,
-		"device_count":    len(ds),
+		"password_saved":   passwordSavedFlag(ctx),
+		"notice":           credHint,
+		"device_count":     len(ds),
 	}
 	if id := loadAccountIdentity(ctx); id != nil {
 		if id.Account != "" {

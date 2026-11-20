@@ -126,6 +126,14 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 	}
 	defer func() { _ = ctx.HTTPClose(sessionID) }()
 
+	// 会话账号（2026-11-20 用户要求：局域网检查列表按账号过滤）。
+	// 本轮同步拉到的每台设备都盖这个账号戳 —— 换账号同步后，旧账号的设备
+	// 保留旧戳，过滤因此能区分"这些设备是谁带进来的"。
+	sessionAccount := ""
+	if id := loadAccountIdentity(ctx); id != nil {
+		sessionAccount = id.Account
+	}
+
 	cloud, err := fetchCloudDevices(ctx, sessionID, ssecurity, deviceID)
 	if err != nil {
 		recordSyncFailure(ctx, err)
@@ -240,6 +248,9 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 			if host != "" {
 				ds[i].Host = host
 			}
+			if sessionAccount != "" {
+				ds[i].Account = sessionAccount
+			}
 			if c.Model != "" {
 				ds[i].Model = c.Model
 			}
@@ -257,6 +268,7 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 			d := miioDevice{
 				ExternalID: external, Host: host, TokenRef: "miio_token",
 				Model: c.Model, Name: name, Capabilities: caps,
+				Account: sessionAccount,
 			}
 			if nid, perr := strconv.ParseUint(external, 10, 32); perr == nil {
 				d.NumericDeviceID = uint32(nid)
@@ -477,6 +489,10 @@ func buildSyncDeviceViews(ctx *plugin.Context, cloud []cloudDeviceView, ds []mii
 		if view.Model == "" {
 			view.Model = local.Model
 		}
+		// 账号戳（2026-11-20）：登记在同步流程里已盖过章，这里如实带出。
+		if registered {
+			view.Account = local.Account
+		}
 		hasToken := registered && local.TokenRef != ""
 		hasAddress := registered && local.Host != ""
 		view.Controllable = hasToken && hasAddress
@@ -522,7 +538,6 @@ func stringInSlice(list []string, target string) bool {
 	}
 	return false
 }
-
 
 // modelHasTurnOnAction 判断型号的 MIoT 规格里是否有 turn-on 动作（红外遥控的判据）。
 //
@@ -632,8 +647,6 @@ func sha256Hex(b []byte) string {
 	s := sha256.Sum256(b)
 	return fmt.Sprintf("%x", s[:])
 }
-
-
 
 // specControls 把规格里的可写属性与动作导出成平台能渲染的控件描述。
 //
@@ -832,9 +845,10 @@ func firstNonEmptyStr(vals ...string) string {
 // `switch` 只画一个"开关"、`button` 只画一个"按下"。
 //
 // 所以先把规格里的可写属性/动作投影成能力，界面才有位置挂：
-//   · 可写 bool 属性（mute / sleep-mode）→ `switch` 实例
-//   · 可写数值属性（volume）             → `number` 实例
-//   · 动作（stop-alarm / play-radio …）  → `button` 实例
+//
+//	· 可写 bool 属性（mute / sleep-mode）→ `switch` 实例
+//	· 可写数值属性（volume）             → `number` 实例
+//	· 动作（stop-alarm / play-radio …）  → `button` 实例
 //
 // 返回的是**能力名集合**（平台按名字去重），实例明细由 spec_json 承载。
 func projectSpecControls(ctx *plugin.Context, model string) []string {
@@ -899,8 +913,9 @@ func isSensorLikeModel(model string) bool {
 //
 // 规格里除 service 1（device-information：厂商/型号/固件）以外、带 `read` 权限的
 // 属性都读；按格式分派：
-//   · float（如 gas-concentration）   ⇒ `sensor {value, unit?}`
-//   · 整型/布尔（如 status 报警等级）  ⇒ `binary_sensor {value}`
+//
+//	· float（如 gas-concentration）   ⇒ `sensor {value, unit?}`
+//	· 整型/布尔（如 status 报警等级）  ⇒ `binary_sensor {value}`
 //
 // 不在这里编语义（0=正常/1=报警）：数值本身就是设备真值，原样呈现比不呈现诚实；
 // 语义映射等确认型号文档后再加。
@@ -971,7 +986,6 @@ func readLANSensorState(ctx *plugin.Context, d miioDevice, external string) (map
 	}
 	return out, nil
 }
-
 
 // readSensorStateViaCloud 经云端读传感器的可读属性（Zigbee 子设备走网关时用）。
 //
@@ -1061,13 +1075,15 @@ func hasAccess(list []string, want string) bool {
 // 用户点开设备页看到的是十几小时前的旧值，或干脆没有值（显示"未知"）。
 //
 // 但也不能无上限 —— wasm 单线程 + 插件 30s 执行预算：
-//   · 局域网直连读：实测 3~35ms/台（很快）
-//   · 云端读：百毫秒~秒级，失败还要重试
+//
+//	· 局域网直连读：实测 3~35ms/台（很快）
+//	· 云端读：百毫秒~秒级，失败还要重试
 //
 // 取"设备数的 1/3、最少 2 台、最多 6 台"：
-//   · 3 台设备 → 每轮 2 台（几乎立刻全覆盖）
-//   · 11 台    → 每轮 3 台（约 3 轮 = 15 分钟覆盖一遍，比 55 分钟好 3.7 倍）
-//   · 30 台    → 每轮 6 台（封顶，避免拖垮同步）
+//
+//	· 3 台设备 → 每轮 2 台（几乎立刻全覆盖）
+//	· 11 台    → 每轮 3 台（约 3 轮 = 15 分钟覆盖一遍，比 55 分钟好 3.7 倍）
+//	· 30 台    → 每轮 6 台（封顶，避免拖垮同步）
 func statePollBudget(deviceCount int) int {
 	n := deviceCount / 3
 	if n < 2 {

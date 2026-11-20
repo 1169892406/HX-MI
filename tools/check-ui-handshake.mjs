@@ -189,6 +189,9 @@ const ACCOUNTS_OK = {
     sync: { enabled: true, interval_seconds: 300 },
   }],
   account_names: { acc_demo: '1169892406@qq.com' },
+  // 2026-11-20 用户要求账号列显示票据状态：更新时间 + 会话归属账号。
+  token_updated_at: '2026-11-20T07:36:00Z',
+  token_account: '1169892406@qq.com',
 };
 const ACCOUNT_VIEW = {
   state: 'no_session', device_count: 0,
@@ -219,7 +222,8 @@ fakePort.postMessage = (frame) => {
     if (tool === 'accounts') result = ACCOUNTS_OK;
     else if (tool === 'account') result = ACCOUNT_VIEW;
     else if (tool === 'health_list') result = { devices: [
-      { name: '台灯', model: 'chuangmi.plug.m3', version: '1.2.3', path: '局域网直连', status: '在线', latency_ms: 12 },
+      { name: '台灯', model: 'chuangmi.plug.m3', version: '1.2.3', path: '局域网直连', status: '在线', latency_ms: 12,
+        account: '1169892406@qq.com' },
       { name: '补光灯', model: 'chuangmi.plug.m1', version: '1.0.9', path: '云端下发', status: '离线', latency_ms: 0 },
     ] };
   }
@@ -293,6 +297,22 @@ console.log('== U19 回来的数据真的能渲染');
     typeof hth.innerHTML === 'string' && hth.innerHTML.includes('设备名称')
       && hth.innerHTML.includes('台灯') && hth.innerHTML.includes('局域网直连'),
     `innerHTML 长度 ${String(hth.innerHTML || '').length}`);
+
+  // 2026-11-20 用户要求三连：账号列显示票据状态；页面删冗余小字；
+  // 局域网检查列表挂账号/家庭筛选框。
+  ok('U19k 账号行显示「Token 更新于」（会话归属行）',
+    collectText(getEl('accounts')).includes('Token 更新于'),
+    'accounts 工具给了 token_updated_at/token_account，对应行必须显示');
+  ok('U19l 健康表行带同步来源账号副行',
+    typeof hth.innerHTML === 'string' && hth.innerHTML.includes('1169892406@qq.com'),
+    '健康行 account 字段要显示出来，否则按账号过滤没法核对');
+  ok('U19m 冗余小字已删（风险盒/探测备注/绑定备注/拆分备注）',
+    !HTML.includes('riskbox') && !HTML.includes('nohint')
+      && !HTML.includes('addsync-note') && !HTML.includes('filters__note'),
+    '2026-11-20 用户裁定：页面小字太多，说明性重复文案删除');
+  ok('U19n 局域网检查列表有账号/家庭筛选框',
+    HTML.includes('id="f-health-account"') && HTML.includes('id="f-health-household"'),
+    '与同步结果一致的筛选框（多账号时过滤）');
 }
 
 /* ══ U20 每个按钮点了都得有反应 ══════════════════════════════════════

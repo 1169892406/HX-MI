@@ -35,14 +35,14 @@ import (
 
 // 设备通信路径
 const (
-	pathLAN    = "局域网直连"
+	pathLAN     = "局域网直连"
 	pathGateway = "网关读取"
-	pathCloud  = "云端下发"
+	pathCloud   = "云端下发"
 )
 
 // 健康检查的三种状态
 const (
-	healthOnline = "在线"
+	healthOnline  = "在线"
 	healthOffline = "离线"
 	healthCloudOK = "云端可用"
 )
@@ -51,12 +51,15 @@ const (
 type healthEntry struct {
 	Name       string `json:"name"`
 	Model      string `json:"model"`
-	Version    string `json:"version"`    // 取不到时为空，前端显示 "-"
+	Version    string `json:"version"` // 取不到时为空，前端显示 "-"
 	Path       string `json:"path"`
 	PathDetail string `json:"path_detail"` // 副标题补充（IP / 经哪台网关）
 	Status     string `json:"status"`
 	LatencyMS  int    `json:"latency_ms"` // <0 表示不适用
 	Latency    string `json:"latency"`    // 给人看的：35 ms / 3s 超时 / 不适用
+	// Account 是同步来源账号（2026-11-20 用户要求：列表按账号过滤）。
+	// 旧登记没有该字段，为空 ⇒ 前端显示时不带账号副行、过滤按"未知"。
+	Account string `json:"account,omitempty"`
 }
 
 // gwModelPrefixes 是"经网关通信、自身不联网"的型号前缀。
@@ -152,6 +155,7 @@ func healthListTool(ctx *plugin.Context) (json.RawMessage, error) {
 		_ = i
 		e := healthEntry{
 			Name: d.Name, Model: d.Model, Version: "",
+			Account:   d.Account,
 			LatencyMS: -1, Latency: "不适用",
 		}
 		switch {
@@ -214,8 +218,8 @@ func healthListTool(ctx *plugin.Context) (json.RawMessage, error) {
 		}
 	}
 	return json.Marshal(map[string]any{
-		"devices": out,
-		"count":   len(out),
+		"devices":    out,
+		"count":      len(out),
 		"checked_at": time.Now().UTC().Format(time.RFC3339),
 	})
 }
@@ -270,7 +274,9 @@ func deviceInfoTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage,
 // fwVersionOf 从 miIO.info 响应里取固件版本。
 //
 // ⚠ 字段在 **result 里**，不在顶层（2026-11-17 实测台灯）：
+//
 //	{"id":..., "result":{"fw_ver":"1.3.9_0006","hw_ver":"ESP8266","model":"...","netif":{...}}}
+//
 // 我原来取顶层 `info["fw_ver"]` 所以全是空 —— 健康检查表里版本列一直显示 "-"。
 //
 // 不同型号字段名可能不同，按常见顺序退让；都取不到就返回空（前端显示 -）。

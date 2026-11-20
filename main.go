@@ -301,11 +301,26 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		if current.SavePassword && !credSaved {
 			note = "已开启「保存账号密码」，但还没有保存到凭据 —— 请重新登录一次以保存（之后票据过期会自动重登）。"
 		}
-		return json.Marshal(map[string]any{
+		/*
+		 * Token 更新时间（2026-11-20 用户要求在账号列显示票据状态）。
+		 *
+		 * 小米不给 serviceToken 有效期（票据寿命不可预估 —— 见 cloudSessionUsable
+		 * 的「9 小时盲判退役」注释），能如实给出的只有：票据最近一次签发/自动
+		 * 续期的时间（cloud-session.json 的 saved_at，登录与自动重登都会刷新）。
+		 * 会话是**单份**的、属于当前登录的那个账号 —— 所以同时返回
+		 * token_account，前端只把时间显示在对应行，不冒充别的账号。
+		 * 是否真的过期以状态（state=auth_required，来自真实探针）为准。
+		 */
+		resp := map[string]any{
 			"accounts": items, "account_names": full,
 			"password_saved": credSaved, "save_password_enabled": current.SavePassword,
 			"notice": note,
-		})
+		}
+		if id := loadAccountIdentity(ctx); id != nil && id.SavedAt != "" {
+			resp["token_updated_at"] = id.SavedAt
+			resp["token_account"] = id.Account
+		}
+		return json.Marshal(resp)
 	case "account_settings":
 		var in struct {
 			AccountID       string  `json:"account_id"`
@@ -550,7 +565,6 @@ func event(ctx *plugin.Context, subject string, payload json.RawMessage) error {
 	}
 	return nil
 }
-
 
 // autoSyncScheduleName 是平台侧定时任务的名字。
 //
