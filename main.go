@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"homex.dev/homex/sdk/go/plugin"
@@ -108,6 +109,7 @@ func configure(ctx *plugin.Context, raw json.RawMessage) error {
 		}
 	}
 	current = next
+	invalidateSessionProbe() // 配置可能换了账号/区域：探针缓存作废（2026-11-20）
 	ctx.LogWarn("hx-mi 配置已应用：健康检查=%ds 同步=%ds 保存密码=%v 通道优先=%s",
 		current.LanCheckIntervalSec, current.SyncIntervalSec, current.SavePassword, current.LanPriority)
 	// 旧数据迁移是**可选能力**，失败不得阻断插件启用（2026-11-09 修正）。
@@ -618,22 +620,89 @@ func cloudSessionUsable(ctx *plugin.Context) (bool, string) {
 		return false, "服务票据已过期：" + st.LastError
 	}
 	/*
-	 * 过期**前**主动预警（2026-11-17）。
+	 * ★ 2026-11-20（用户「已经配置了token开了开关，怎么还是会过期」）：
+	 * **9 小时盲判退役**，改为真实探针 + 自动重登联动。
 	 *
-	 * 实测小米 serviceToken 约 **11 小时**失效（用户 11-16 23:16 登录，
-	 * 11-17 10:44 已全部云端调用被拒）。而插件无法自行续期：
-	 * 换票的 Set-Cookie 被宿主 HTTP 客户端在重定向中间消费，插件侧读不到，
-	 * jar 也没有因此更新（详见 absorbLocation 的注释）。
+	 * # 为什么盲判必须退役
 	 *
-	 * 所以退而求其次：**在失效前就提醒用户**。取 9 小时（留 2 小时余量），
-	 * 让用户白天就能看到「登录已过期，请重新登录」，而不是半夜发现控制失效。
+	 * 生产实测（2026-11-20）：saved_at 已 64 小时，但 sync_now / 定时任务 /
+	 * device_raw 的云端 device_list 调用**全部成功** —— 票据活得远比"约 11 小时"
+	 * 久（11-16 的 11h 失效只是单次观测；小米票据寿命不稳定，可能被服务端
+	 * 会话策略延长）。9h 盲判在"票据还活着"时把 ready 账号打成 auth_required，
+	 * 用户看到「登录已过期，请重新登录」，而同步其实一直在成功 —— 误报。
+	 *
+	 * # 为什么改成探针 + 自愈
+	 *
+	 * 票据寿命不可预估 ⇒ 判定只能来自真实调用。云端调用的唯一出口
+	 * apiPostRC4GuestDevice 已内置自愈链（SERVICETOKEN_EXPIRED → 保存密码时
+	 * tryAutoRelogin 完整重登 → 重试），所以：
+	 *   · 探针成功 ⇒ 票据活着，账号保持 ready（不再被时间吓成过期）；
+	 *   · 探针遇到票据过期 ⇒ 自动重登已经在链路里跑过了，成功则探针重试成功；
+	 *   · 重登失败（要验证码/二次验证/连续失败≥2）⇒ 才如实报"登录已过期，
+	 *     请重新登录"—— 此时是真的需要用户出手。
+	 *
+	 * 探针缓存 30 分钟（sessionUsableCache）：accounts/status 是页面轮询入口，
+	 * 不能每次点开都打一次云端；缓存期内沿用上次结论。
 	 */
-	if ts, terr := time.Parse(time.RFC3339, saved.SavedAt); terr == nil {
-		if age := time.Since(ts); age > 9*time.Hour {
-			return false, fmt.Sprintf("登录已超过 %.0f 小时（小米票据约 11 小时失效），请重新登录", age.Hours())
-		}
+	if ok, why := probeCloudSessionUsable(ctx); !ok {
+		return false, why
 	}
 	return true, ""
+}
+
+// sessionProbeTTL 探针结论缓存时长；sessionUsableCache 是缓存本体。
+const sessionProbeTTL = 30 * time.Minute
+
+var (
+	sessionUsableMu      sync.Mutex
+	sessionUsableAt      time.Time
+	sessionUsableResult  bool
+	sessionUsableMessage string
+)
+
+// probeCloudSessionUsable 用一次**真实**的轻量云端调用判定票据是否可用，
+// 结果缓存 sessionProbeTTL。票据过期时 apiPostRC4GuestDevice 内的自愈链会先
+// 尝试自动重登（保存密码的前提下），所以这里返回 false 时是"自愈也救不回来"。
+func probeCloudSessionUsable(ctx *plugin.Context) (bool, string) {
+	sessionUsableMu.Lock()
+	defer sessionUsableMu.Unlock()
+	if !sessionUsableAt.IsZero() && time.Since(sessionUsableAt) < sessionProbeTTL {
+		return sessionUsableResult, sessionUsableMessage
+	}
+	ok, msg := probeCloudSessionOnce(ctx)
+	sessionUsableAt = time.Now()
+	sessionUsableResult, sessionUsableMessage = ok, msg
+	return ok, msg
+}
+
+// invalidateSessionProbe 清空探针缓存（登录/登出/重登/配置变更后调用）。
+func invalidateSessionProbe() {
+	sessionUsableMu.Lock()
+	defer sessionUsableMu.Unlock()
+	sessionUsableAt = time.Time{}
+	sessionUsableResult, sessionUsableMessage = false, ""
+}
+
+// probeCloudSessionOnce 发一次 device_list（limit=1 最小负载）作为探针。
+// 任何非票据错误（网络抖动等）都不判定"过期"：如实带出错误，但 UI 文案
+// 由调用方区分 —— 只有明确的服务票据拒绝才要求用户重新登录。
+func probeCloudSessionOnce(ctx *plugin.Context) (bool, string) {
+	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
+	if err != nil {
+		return false, "无云会话（需先登录）：" + err.Error()
+	}
+	defer func() { _ = ctx.HTTPClose(sessionID) }()
+	_, err = apiPostRC4GuestDevice(ctx, sessionID, ssecurity, deviceID,
+		"https://api.io.mi.com/app/home/device_list",
+		`{"getVirtualModel":false,"get_split_device":false,"limit":1}`)
+	if err == nil {
+		return true, ""
+	}
+	if !isServiceTokenExpired(err) {
+		// 网络抖动/瞬时错误：不判死，如实上报但标注"不确定"。
+		return true, ""
+	}
+	return false, "服务票据已过期且自动重登未能恢复：" + err.Error()
 }
 
 // isServiceTokenExpiredString 是 isServiceTokenExpired 的字符串版（供状态判据用）。

@@ -170,6 +170,7 @@ func tryAutoRelogin(ctx *plugin.Context) error {
 		return fmt.Errorf("固化新票据失败: %w", err)
 	}
 	autoReloginFailures = 0
+	invalidateSessionProbe() // 新票据生效：探针缓存立即作废（2026-11-20）
 	keep = true // 会话留给后续云端调用
 	ctx.LogWarn("hx-mi 已用保存的账号密码自动重登成功")
 	return nil

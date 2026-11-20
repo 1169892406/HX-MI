@@ -103,6 +103,7 @@ func exchangeAndProbe(ctx *plugin.Context, id string, s *loginSession, loc, ssec
 	s.Reason = ""
 	s.Protocol.Challenge = nil
 	challengeSecrets.delete(id)
+	invalidateSessionProbe() // 新票据生效：探针缓存立即作废（2026-11-20）
 	if err = saveLoginSession(ctx, id, *s); err != nil {
 		return nil, err
 	}

@@ -283,6 +283,7 @@ func logoutLogin(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, er
 	if e := ctx.FSRemove("cloud-session.json"); e != nil {
 		failures = append(failures, "删除会话文件失败: "+e.Error())
 	}
+	invalidateSessionProbe() // 会话已销毁：探针缓存立即作废（2026-11-20）
 
 	// ⑥ 同步状态快照：账号都没了，这些数字再留着就是谎
 	_ = ctx.FSRemove(syncStatePath)

@@ -2,10 +2,10 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.159",
+  "version": "2.0.0-alpha.160",
   "publisher": {
-    "id": "homex",
-    "display_name": "HOMEX Official",
+    "id": "hx-community",
+    "display_name": "HX Community",
     "homepage": "https://homex.dev"
   },
   "type": "device_driver",
@@ -336,7 +336,7 @@
   },
   "signature": {
     "algorithm": "ed25519",
-    "key_id": "homex-official",
+    "key_id": "hx-mi-community",
     "value": ""
   },
   "changelog": "传感器温度统一写 temperature 属性（老协议路径原先写 value）。平台状态库按属性名合并、从不删旧键，键名不一致会让同一个温度在库里留下两个键，界面出现「温度 37 / 数值 40」两条、其中一条是两天前的残留。规格化与云端 BLE 路径同样带 unit=℃ 并正名 temperature（云端仅用于无局域网 IP 的 BLE 传感器）。",
