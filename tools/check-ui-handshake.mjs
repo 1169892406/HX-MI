@@ -218,7 +218,10 @@ fakePort.postMessage = (frame) => {
     const tool = frame.payload && frame.payload.tool;
     if (tool === 'accounts') result = ACCOUNTS_OK;
     else if (tool === 'account') result = ACCOUNT_VIEW;
-    else if (tool === 'health_list') result = { devices: [] };
+    else if (tool === 'health_list') result = { devices: [
+      { name: '台灯', model: 'chuangmi.plug.m3', version: '1.2.3', path: '局域网直连', status: '在线', latency_ms: 12 },
+      { name: '补光灯', model: 'chuangmi.plug.m1', version: '1.0.9', path: '云端下发', status: '离线', latency_ms: 0 },
+    ] };
   }
   // 真的投递回插件（真实 MessagePort 会做这件事；假端口不会）。
   if (portHandler) portHandler({ data: { hx: PLATFORM_HX, id: frame.id, ok: true, result } });
@@ -270,6 +273,26 @@ console.log('== U19 回来的数据真的能渲染');
     `实际：${tilesText.slice(0, 120)}`);
   ok('U19h 设备列表渲染出设备', collectText(getEl('dev-list')).includes('台灯'),
     `实际：${collectText(getEl('dev-list')).slice(0, 120)}`);
+
+  // 2026-11-20 结构修正（用户裁定）：同步任务独立卡片；「同步结果」与
+  // 「局域网检查」是**两个列表**的并排页签，挂在结果卡片上。
+  // （桩 document.querySelector 恒 null —— 这里按 index.html 源码断言结构。）
+  const sec3 = HTML.split('<section class="sec">')[3] || '';
+  ok('U19i 同步任务是独立卡片（标题无页签）',
+    sec3.includes('<h2>同步任务</h2>') && !sec3.includes('class="seg"'),
+    '第③区应为「同步任务」且不带 seg 页签');
+  const sec4 = HTML.split('<section class="sec">')[4] || '';
+  ok('U19i2 结果卡片标题为「同步结果与局域网检查」且带页签',
+    sec4.includes('<h2>同步结果与局域网检查</h2>')
+      && sec4.includes('id="tab-dev"') && sec4.includes('id="tab-health"'),
+    '第④区应挂同步结果 / 局域网检查并排页签');
+  // 健康表走 innerHTML 路径（FakeEl 不解析 HTML，文本抓不到）——
+  // 判据改为「renderHealth 真的跑了」：innerHTML 非空且包含表头列名。
+  const hth = getEl('health-table');
+  ok('U19j 局域网检查列表真的渲染（表头+行数据）',
+    typeof hth.innerHTML === 'string' && hth.innerHTML.includes('设备名称')
+      && hth.innerHTML.includes('台灯') && hth.innerHTML.includes('局域网直连'),
+    `innerHTML 长度 ${String(hth.innerHTML || '').length}`);
 }
 
 /* ══ U20 每个按钮点了都得有反应 ══════════════════════════════════════
@@ -314,6 +337,23 @@ console.log('== U20 按钮点击都有反应');
 
   const healthOps = await clickAndCollect('btn-health-refresh', '立即检查');
   ok('U20e 「立即检查」发出请求', healthOps.includes('plugin.tool.call'), `实际：${healthOps.join(',') || '（无帧）'}`);
+
+  // —— 列表页签（2026-11-20 用户裁定：同步结果 / 局域网检查并排页签）——
+  ok('U20r 默认显示「同步结果」页签',
+    getEl('pane-dev').hidden === false && getEl('pane-health').hidden === true,
+    '初始态应为 pane-dev 可见、pane-health 隐藏');
+  getEl('tab-health').fire('click');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('U20s 点「局域网检查」切到健康列表',
+    getEl('pane-dev').hidden === true && getEl('pane-health').hidden === false
+      && getEl('tab-health').getAttribute('aria-selected') === 'true',
+    'pane-dev 应隐藏、pane-health 应可见');
+  getEl('tab-dev').fire('click');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('U20t 点回「同步结果」切回设备列表',
+    getEl('pane-dev').hidden === false && getEl('pane-health').hidden === true
+      && getEl('tab-dev').getAttribute('aria-selected') === 'true',
+    '往返切换后应恢复初始态');
 
   // —— 展开类 ——
   getEl('btn-add').fire('click');

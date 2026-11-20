@@ -146,39 +146,65 @@
     </div>
   </section>
 
-  <!-- ── ③ 同步与检查（两个列表并排页签，点击切换）──────────-->
+  <!-- ── ③ 同步任务（任务管理独立卡片）──────────────────────-->
   <section class="sec">
     <div class="sec__hd">
-      <h2>同步与检查</h2>
-      <div class="seg" role="tablist" aria-label="列表切换">
-        <button type="button" id="tab-sync" class="seg__btn seg__btn--on" role="tab" aria-selected="true">自动同步</button>
-        <button type="button" id="tab-health" class="seg__btn" role="tab" aria-selected="false">局域网检查</button>
-      </div>
+      <h2>同步任务</h2>
       <span class="muted small" id="sync-count"></span>
       <span class="spacer"></span>
       <span id="sync-state-pill" class="pill"><i></i><span id="res-state-t">空闲</span></span>
     </div>
     <div class="card">
-      <!-- 页签一：自动同步列表 -->
-      <div id="pane-sync">
-        <!-- 添加表单常驻（操作入口一直可见，不折叠） -->
-        <div class="addrow">
-          <label class="fld"><span>小米账号</span>
-            <select id="f-sync-account"></select></label>
-          <label class="fld"><span>家庭</span>
-            <select id="f-sync-household"></select></label>
-          <label class="fld"><span>同步周期</span>
-            <select id="f-interval-sel" data-role="interval"></select></label>
-          <label class="fld addrow__sw"><span>开启同步</span>
-            <span class="switch-row" id="polling-row">
-              <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="true"><i></i></button>
-              <span id="polling-t">开启</span>
-            </span></label>
-          <button type="button" id="btn-add-sync-ok" class="btn btn--primary">添加任务</button>
+      <!-- 添加表单常驻（操作入口一直可见，不折叠） -->
+      <div class="addrow">
+        <label class="fld"><span>小米账号</span>
+          <select id="f-sync-account"></select></label>
+        <label class="fld"><span>家庭</span>
+          <select id="f-sync-household"></select></label>
+        <label class="fld"><span>同步周期</span>
+          <select id="f-interval-sel" data-role="interval"></select></label>
+        <label class="fld addrow__sw"><span>开启同步</span>
+          <span class="switch-row" id="polling-row">
+            <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="true"><i></i></button>
+            <span id="polling-t">开启</span>
+          </span></label>
+        <button type="button" id="btn-add-sync-ok" class="btn btn--primary">添加任务</button>
+      </div>
+      <p class="muted small" id="addsync-note"></p>
+      <div id="sync-table" class="tscroll"><p class="muted small">读取中…</p></div>
+      <div id="res-fail" class="banner banner--warn" hidden></div>
+    </div>
+  </section>
+
+  <!-- ── ④ 同步结果与局域网检查（两个列表并排页签，点击切换）──────────-->
+  <section class="sec">
+    <div class="sec__hd">
+      <h2>同步结果与局域网检查</h2>
+      <div class="seg" role="tablist" aria-label="列表切换">
+        <button type="button" id="tab-dev" class="seg__btn seg__btn--on" role="tab" aria-selected="true">同步结果</button>
+        <button type="button" id="tab-health" class="seg__btn" role="tab" aria-selected="false">局域网检查</button>
+      </div>
+    </div>
+    <div class="card">
+      <!-- 页签一：同步结果列表 -->
+      <div id="pane-dev">
+        <div class="pane-hd">
+          <span class="muted small" id="res-when"></span>
+          <span class="spacer"></span>
+          <button type="button" id="btn-dev-refresh" class="btn btn--sm">↻ 刷新设备</button>
         </div>
-        <p class="muted small" id="addsync-note"></p>
-        <div id="sync-table" class="tscroll"><p class="muted small">读取中…</p></div>
-        <div id="res-fail" class="banner banner--warn" hidden></div>
+        <div class="filters">
+          <label class="fld"><span>所属账号</span>
+            <select id="f-dev-account"></select></label>
+          <label class="fld"><span>家庭</span>
+            <select id="f-dev-household"></select></label>
+          <span class="muted small filters__note">设备由家庭级同步会话拉取，暂不按账号拆分归属。</span>
+        </div>
+        <div id="res-tiles" class="stats"></div>
+        <div class="devgrid">
+          <div id="dev-list" class="devlist"><p class="muted small">读取中…</p></div>
+          <div id="dev-detail" class="devdetail"><p class="muted small">左侧选择设备查看详情。</p></div>
+        </div>
       </div>
 
       <!-- 页签二：局域网检查列表 -->
@@ -190,30 +216,6 @@
         </div>
         <p class="sec__d">按设备实际通信路径分别检测：局域网直连 / 网关读取 / 云端下发。单台超时 1.2 秒，上次未返回则跳过本次（不堆叠）。</p>
         <div id="health-table" class="tscroll"><p class="muted small">读取中…</p></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ── ④ 同步设备 / 设备管理 ───────────────────────────────-->
-  <section class="sec">
-    <div class="sec__hd">
-      <h2>同步设备 / 设备管理</h2>
-      <span class="muted small" id="res-when"></span>
-      <span class="spacer"></span>
-      <button type="button" id="btn-dev-refresh" class="btn btn--sm">↻ 刷新设备</button>
-    </div>
-    <div class="card">
-      <div class="filters">
-        <label class="fld"><span>所属账号</span>
-          <select id="f-dev-account"></select></label>
-        <label class="fld"><span>家庭</span>
-          <select id="f-dev-household"></select></label>
-        <span class="muted small filters__note">设备由家庭级同步会话拉取，暂不按账号拆分归属。</span>
-      </div>
-      <div id="res-tiles" class="stats"></div>
-      <div class="devgrid">
-        <div id="dev-list" class="devlist"><p class="muted small">读取中…</p></div>
-        <div id="dev-detail" class="devdetail"><p class="muted small">左侧选择设备查看详情。</p></div>
       </div>
     </div>
   </section>
