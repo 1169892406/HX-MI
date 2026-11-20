@@ -146,34 +146,52 @@
     </div>
   </section>
 
-  <!-- ── ③ 同步任务 ──────────────────────────────────────────-->
+  <!-- ── ③ 同步与检查（两个列表并排页签，点击切换）──────────-->
   <section class="sec">
     <div class="sec__hd">
-      <h2>同步任务</h2>
+      <h2>同步与检查</h2>
+      <div class="seg" role="tablist" aria-label="列表切换">
+        <button type="button" id="tab-sync" class="seg__btn seg__btn--on" role="tab" aria-selected="true">自动同步</button>
+        <button type="button" id="tab-health" class="seg__btn" role="tab" aria-selected="false">局域网检查</button>
+      </div>
       <span class="muted small" id="sync-count"></span>
       <span class="spacer"></span>
       <span id="sync-state-pill" class="pill"><i></i><span id="res-state-t">空闲</span></span>
     </div>
     <div class="card">
-      <!-- 添加表单常驻（操作入口一直可见，不折叠） -->
-      <div class="addrow">
-        <label class="fld"><span>小米账号</span>
-          <select id="f-sync-account"></select></label>
-        <label class="fld"><span>家庭</span>
-          <select id="f-sync-household"></select></label>
-        <label class="fld"><span>同步周期</span>
-          <select id="f-interval-sel" data-role="interval"></select></label>
-        <label class="fld addrow__sw"><span>开启同步</span>
-          <span class="switch-row" id="polling-row">
-            <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="true"><i></i></button>
-            <span id="polling-t">开启</span>
-          </span></label>
-        <button type="button" id="btn-add-sync-ok" class="btn btn--primary">添加任务</button>
+      <!-- 页签一：自动同步列表 -->
+      <div id="pane-sync">
+        <!-- 添加表单常驻（操作入口一直可见，不折叠） -->
+        <div class="addrow">
+          <label class="fld"><span>小米账号</span>
+            <select id="f-sync-account"></select></label>
+          <label class="fld"><span>家庭</span>
+            <select id="f-sync-household"></select></label>
+          <label class="fld"><span>同步周期</span>
+            <select id="f-interval-sel" data-role="interval"></select></label>
+          <label class="fld addrow__sw"><span>开启同步</span>
+            <span class="switch-row" id="polling-row">
+              <button type="button" id="sw-polling" class="switch" role="switch" aria-checked="true"><i></i></button>
+              <span id="polling-t">开启</span>
+            </span></label>
+          <button type="button" id="btn-add-sync-ok" class="btn btn--primary">添加任务</button>
+        </div>
+        <p class="muted small" id="addsync-note"></p>
+        <div id="sync-table" class="tscroll"><p class="muted small">读取中…</p></div>
+        <div id="res-fail" class="banner banner--warn" hidden></div>
       </div>
-      <p class="muted small" id="addsync-note"></p>
-      <div id="sync-table" class="tscroll"><p class="muted small">读取中…</p></div>
+
+      <!-- 页签二：局域网检查列表 -->
+      <div id="pane-health" hidden>
+        <div class="pane-hd">
+          <span class="muted small" id="health-interval-label"></span>
+          <span class="spacer"></span>
+          <button type="button" id="btn-health-refresh" class="btn btn--primary btn--sm">立即检查</button>
+        </div>
+        <p class="sec__d">按设备实际通信路径分别检测：局域网直连 / 网关读取 / 云端下发。单台超时 1.2 秒，上次未返回则跳过本次（不堆叠）。</p>
+        <div id="health-table" class="tscroll"><p class="muted small">读取中…</p></div>
+      </div>
     </div>
-    <div id="res-fail" class="banner banner--warn" hidden></div>
   </section>
 
   <!-- ── ④ 同步设备 / 设备管理 ───────────────────────────────-->
@@ -200,19 +218,6 @@
     </div>
   </section>
 
-  <!-- ── ⑤ 设备健康检查 ──────────────────────────────────────-->
-  <section class="sec">
-    <div class="sec__hd">
-      <h2>设备健康检查</h2>
-      <span class="muted small" id="health-interval-label"></span>
-      <span class="spacer"></span>
-      <button type="button" id="btn-health-refresh" class="btn btn--primary btn--sm">立即检查</button>
-    </div>
-    <div class="card">
-      <p class="sec__d">按设备实际通信路径分别检测：局域网直连 / 网关读取 / 云端下发。单台超时 1.2 秒，上次未返回则跳过本次（不堆叠）。</p>
-      <div id="health-table" class="tscroll"><p class="muted small">读取中…</p></div>
-    </div>
-  </section>
 </div>
 
 <!-- ⚠ 这一行不能少（2026-11-10 踩过）：

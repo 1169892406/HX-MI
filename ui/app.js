@@ -1194,6 +1194,20 @@
     return true;
   }
 
+  /* ── 列表切换页签 ─────────────────────────────────────── */
+
+  /** 「同步与检查」卡里两个并排页签：点击切到对应列表。 */
+  function showTab(which) {
+    var sync = which !== 'health';
+    el('pane-sync').hidden = !sync;
+    el('pane-health').hidden = sync;
+    el('tab-sync').className = 'seg__btn' + (sync ? ' seg__btn--on' : '');
+    el('tab-sync').setAttribute('aria-selected', sync ? 'true' : 'false');
+    el('tab-health').className = 'seg__btn' + (sync ? '' : ' seg__btn--on');
+    el('tab-health').setAttribute('aria-selected', sync ? 'false' : 'true');
+    scheduleHeight();
+  }
+
   /* ── 同步状态 + 设备管理 ──────────────────────────────── */
 
   /** 读一次"同步结果"（账号工具的家庭级视图：是运行事实，不是配置）。 */
@@ -1676,6 +1690,9 @@
     // 同步任务
     el('sw-polling').addEventListener('click', function () { setPolling(!pollingOn()); });
     el('btn-add-sync-ok').addEventListener('click', submitAddTask);
+    // 列表切换页签：自动同步 / 局域网检查（并排放置，点击切到对应列表）
+    el('tab-sync').addEventListener('click', function () { showTab('sync'); });
+    el('tab-health').addEventListener('click', function () { showTab('health'); });
     // 设备管理
     var dr = el('btn-dev-refresh');
     if (dr) dr.addEventListener('click', function () { loadSyncResult(); });

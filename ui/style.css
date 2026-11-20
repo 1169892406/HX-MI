@@ -280,6 +280,23 @@ body {
 .lanstat--none { color: var(--muted); background: var(--card2); border-color: var(--line); }
 .nohint { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 
+/* ── 列表切换页签（自动同步 / 局域网检查 并排）────────── */
+.seg {
+  display: inline-flex; background: var(--card2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 3px; gap: 2px;
+}
+.seg__btn {
+  appearance: none; border: none; background: transparent; font: inherit; font-size: 12.5px;
+  font-weight: 500; color: var(--muted); padding: 6px 14px; border-radius: 8px; cursor: pointer;
+  white-space: nowrap; transition: background .15s, color .15s;
+}
+.seg__btn:hover { color: var(--text); }
+.seg__btn--on {
+  background: var(--card); color: var(--accent); font-weight: 600;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .1);
+}
+.pane-hd { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+
 /* ── ③ 同步任务 ───────────────────────────────────────── */
 .addrow {
   display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap;
