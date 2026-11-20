@@ -199,10 +199,24 @@ const ACCOUNT_VIEW = {
     enabled: true, running: false, devices: 2, controllable: 1, uncontrollable: 1,
     last_ok_at: '2026-11-20T06:30:14Z', next_sync_at: '2026-11-20T06:35:14Z',
     device_list: [
-      { did: '100', name: '台灯', model: 'chuangmi.plug.m3', controllable: true, available: true, online: true },
-      { did: '101', name: '补光灯', model: 'chuangmi.plug.m1', controllable: true, available: true, online: false },
+      { did: '100', name: '台灯', model: 'chuangmi.plug.m3', controllable: true, available: true, online: true, account: '1169892406@qq.com' },
+      { did: '101', name: '补光灯', model: 'chuangmi.plug.m1', controllable: true, available: true, online: false, account: '1169892406@qq.com' },
     ],
   },
+};
+// 2026-11-20 用户裁定：详情页要有真实数据（开关 / 温度 / 指示灯开关）——
+// device_detail 工具应答：规格定义 + 实时值。
+const DEVICE_DETAIL_OK = {
+  did: '100', name: '台灯', model: 'chuangmi.plug.m3', host: '192.168.1.62',
+  controls: [
+    { capability: 'switch', instance_id: '2.1', name: '开关', group: '灯', kind: 'prop', siid: 2, piid: 1, format: 'bool' },
+    { capability: 'switch', instance_id: '3.1', name: '指示灯 开关', group: '指示灯', kind: 'prop', siid: 3, piid: 1, format: 'bool' },
+  ],
+  sensors: [
+    { siid: 2, piid: 2, name: '温度', format: 'float', unit: 'c', service: '环境' },
+  ],
+  values: { '2.1': true, '3.1': false, '2.2': 28.4 },
+  values_source: 'lan', values_at: '2026-11-20T10:40:00Z',
 };
 const CONFIG_OK = {
   plugin_id: 'homex.xiaomi_miot', version: '0.0.0-test', legacy: false,
@@ -226,6 +240,7 @@ fakePort.postMessage = (frame) => {
         account: '1169892406@qq.com' },
       { name: '补光灯', model: 'chuangmi.plug.m1', version: '1.0.9', path: '云端下发', status: '离线', latency_ms: 0 },
     ] };
+    else if (tool === 'device_detail') result = DEVICE_DETAIL_OK;
   }
   // 真的投递回插件（真实 MessagePort 会做这件事；假端口不会）。
   if (portHandler) portHandler({ data: { hx: PLATFORM_HX, id: frame.id, ok: true, result } });
@@ -313,6 +328,25 @@ console.log('== U19 回来的数据真的能渲染');
   ok('U19n 局域网检查列表有账号/家庭筛选框',
     HTML.includes('id="f-health-account"') && HTML.includes('id="f-health-household"'),
     '与同步结果一致的筛选框（多账号时过滤）');
+
+  // 2026-11-20 用户裁定：详情页要有真实数据（开关 / 温度 / 指示灯开关）。
+  // 详情行走 appendChild（FakeEl 抓不到 innerHTML）—— 判据用 collectText。
+  const ddOps = calls.map((m) => m.payload && m.payload.tool).filter(Boolean);
+  ok('U19o 详情页发出 device_detail 请求', ddOps.includes('device_detail'),
+    `实际请求过的工具：${ddOps.join(',')}`);
+  const ddText = collectText(getEl('dev-detail'));
+  ok('U19p 控制页签渲染出开关与指示灯（含实时值）',
+    ddText.includes('开关') && ddText.includes('指示灯 开关'),
+    `实际：${ddText.slice(0, 200)}`);
+  ok('U19q 传感器页签渲染出温度实时值（28.4 c）',
+    ddText.includes('温度') && ddText.includes('28.4 c'),
+    `实际：${ddText.slice(0, 200)}`);
+  ok('U19r 详情页签计数用真实规格（控制 (2) / 传感器 (1)）',
+    ddText.includes('控制 (2)') && ddText.includes('传感器 (1)'),
+    `实际：${ddText.slice(0, 120)}`);
+  ok('U19s 实时值来源如实标注（局域网直连）',
+    ddText.includes('局域网直连'),
+    'values_source 必须透出，读不到时不许装作有值');
 }
 
 /* ══ U20 每个按钮点了都得有反应 ══════════════════════════════════════

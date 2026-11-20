@@ -63,6 +63,9 @@
   var devFilterAccount = '';
   /* 局域网检查列表的账号过滤（2026-11-20 用户要求） */
   var healthFilterAccount = '';
+  /* 设备详情缓存：did -> device_detail 应答（或 {error}）；pending 防重复请求 */
+  var devDetailCache = {};
+  var devDetailPending = {};
   /* 同步表当前展开编辑条的账号 id */
   var openEditId = '';
 
@@ -1418,6 +1421,72 @@
    * 插件页**不下发设备命令**（平台协议没有该工具）—— 控制页签如实展示
    * 可控性与通信路径；命令在平台设备页下发。
    */
+  /*
+   * 设备详情：控制 / 传感器 / 配置 三个页签 —— 数据来自 device_detail 工具
+   * （2026-11-20 用户「台灯控制 传感器 配置没有数据啊：插件侧可以获取到的啊
+   * 实际数据是--开关 温度 指示灯开关」）：
+   *   · 控制 = 规格里可读可写的属性（开关 / 指示灯开关…），带实时值；
+   *   · 传感器 = 规格里纯只读的属性（温度…），带实时值；
+   *   · 配置 = 设备元数据 + 实时值来源。
+   * 插件页**不下发设备命令**（平台协议没有该工具）—— 命令在平台设备页下发，
+   * 这里如实展示规格与实时状态。实时值读不到时如实报"不可达"，不装作有值。
+   */
+  /** 把属性原始值排成人话：bool→开/关、数值带单位、枚举用 value-list 描述。 */
+  function fmtDetailValue(item, raw, boolYes, boolNo) {
+    if (raw === undefined || raw === null) return '—';
+    var yes = boolYes || '开';
+    var no = boolNo || '关';
+    if (typeof raw === 'boolean') {
+      if (item && item.values) {
+        var vb = item.values[raw ? 1 : 0];
+        if (vb) return vb;
+      }
+      return raw ? yes : no;
+    }
+    if (typeof raw === 'number') {
+      if (item && item.values && item.values[raw] !== undefined) return item.values[raw];
+      var s = String(raw);
+      if (item && item.unit) s += ' ' + item.unit;
+      return s;
+    }
+    return String(raw);
+  }
+
+  /** 详情数据懒加载：缓存命中不重发；应答回来仍选中同一台才重渲染。 */
+  function loadDeviceDetail(d) {
+    var key = d.did || d.name || '';
+    if (!key || devDetailCache[key] || devDetailPending[key]) return;
+    devDetailPending[key] = true;
+    rpc('plugin.tool.call', { tool: 'device_detail', args: { did: d.did, name: d.name } })
+      .then(function (res) {
+        delete devDetailPending[key];
+        devDetailCache[key] = failed(res) ? { error: failText(res) } : res;
+        if (devSelDid === (d.did || '')) renderDetail();
+        scheduleHeight();
+      })
+      .catch(function (e) {
+        delete devDetailPending[key];
+        devDetailCache[key] = { error: errText(e) };
+        if (devSelDid === (d.did || '')) renderDetail();
+        scheduleHeight();
+      });
+  }
+
+  /** 详情页里的一行「名 | 值」（复用 kv 行样式）。 */
+  function detailRow(pane, k, v) {
+    var row = document.createElement('div');
+    row.className = 'kv__row';
+    var kEl = document.createElement('span');
+    kEl.className = 'kv__k';
+    kEl.textContent = k;
+    var vEl = document.createElement('span');
+    vEl.className = 'kv__v';
+    vEl.textContent = v;
+    row.appendChild(kEl);
+    row.appendChild(vEl);
+    pane.appendChild(row);
+  }
+
   function renderDetail() {
     var box = el('dev-detail');
     box.innerHTML = '';
@@ -1452,15 +1521,21 @@
     box.appendChild(meta);
 
     var h = healthByName(d.name);
-    var ctlCount = (d.controllable !== false && !d.reason && !d.reason_text) ? 1 : 0;
+    // 详情数据：缓存命中直接用；没有就懒加载（回来重渲染）。
+    var dkey = d.did || d.name || '';
+    loadDeviceDetail(d);
+    var detail = devDetailCache[dkey];
+    var controls = (detail && detail.controls) || [];
+    var sensors = (detail && detail.sensors) || [];
+    var values = (detail && detail.values) || {};
 
     var tabs = document.createElement('div');
     tabs.className = 'tabs';
     var panes = {};
     var defs = [
-      { key: 'ctl', label: '控制 (' + ctlCount + ')' },
-      { key: 'sns', label: '传感器 (0)' },
-      { key: 'cfg', label: '配置 (7)' }
+      { key: 'ctl', label: detail ? ('控制 (' + controls.length + ')') : '控制 (…)' },
+      { key: 'sns', label: detail ? ('传感器 (' + sensors.length + ')') : '传感器 (…)' },
+      { key: 'cfg', label: '配置' }
     ];
     defs.forEach(function (def) {
       var tabBtn = document.createElement('button');
@@ -1489,16 +1564,40 @@
     });
     box.appendChild(tabs);
 
-    // 控制页签
+    // —— 控制页签 ——
     var callout = document.createElement('div');
-    if (ctlCount) {
+    if (controls.length) {
       callout.className = 'callout callout--ok';
-      callout.textContent = '✓ 该设备支持远程控制 —— 命令经平台设备页下发，本页提供状态与诊断。';
+      callout.textContent = '✓ 规格里声明了 ' + controls.length + ' 个控制项 —— 命令经平台设备页下发，本页展示实时状态。';
+    } else if (detail && !detail.error) {
+      callout.className = 'callout callout--warn';
+      callout.textContent = '该型号规格里没有可写控制项。';
     } else {
       callout.className = 'callout callout--warn';
       callout.textContent = '不可控 · ' + (d.reason_text || d.reason || '云端未声明可控能力');
     }
     panes.ctl.appendChild(callout);
+    if (!detail) {
+      var pWait = document.createElement('p');
+      pWait.className = 'muted small';
+      pWait.textContent = '读取规格与实时值…';
+      panes.ctl.appendChild(pWait);
+    } else if (detail.error) {
+      var pErr = document.createElement('p');
+      pErr.className = 'muted small';
+      pErr.textContent = '读取失败：' + detail.error;
+      panes.ctl.appendChild(pErr);
+    } else {
+      controls.forEach(function (c) {
+        if (c.kind === 'action') {
+          detailRow(panes.ctl, c.name || c.instance_id, '按钮 · 平台设备页下发');
+          return;
+        }
+        var key = c.siid + '.' + c.piid;
+        var v = values[key];
+        detailRow(panes.ctl, c.name || key, fmtDetailValue(c, v));
+      });
+    }
     var pathP = document.createElement('p');
     pathP.className = 'muted small';
     pathP.textContent = h
@@ -1506,33 +1605,45 @@
       : '通信路径：暂无健康检查数据（点「立即检查」刷新）。';
     panes.ctl.appendChild(pathP);
 
-    // 传感器页签
-    var sns = document.createElement('p');
-    sns.className = 'muted small';
-    sns.textContent = '暂无传感器数据 —— 传感器读数请查看平台设备页。';
-    panes.sns.appendChild(sns);
-
-    // 配置页签
-    function addKv(k, v) {
-      var row = document.createElement('div');
-      row.className = 'kv__row';
-      var kEl = document.createElement('span');
-      kEl.className = 'kv__k';
-      kEl.textContent = k;
-      var vEl = document.createElement('span');
-      vEl.className = 'kv__v';
-      vEl.textContent = v;
-      row.appendChild(kEl);
-      row.appendChild(vEl);
-      panes.cfg.appendChild(row);
+    // —— 传感器页签 ——
+    if (!detail) {
+      var sWait = document.createElement('p');
+      sWait.className = 'muted small';
+      sWait.textContent = '读取规格与实时值…';
+      panes.sns.appendChild(sWait);
+    } else if (detail.error) {
+      var sErr = document.createElement('p');
+      sErr.className = 'muted small';
+      sErr.textContent = '读取失败：' + detail.error;
+      panes.sns.appendChild(sErr);
+    } else if (!sensors.length) {
+      var sNone = document.createElement('p');
+      sNone.className = 'muted small';
+      sNone.textContent = '规格里没有只读传感器属性。';
+      panes.sns.appendChild(sNone);
+    } else {
+      sensors.forEach(function (s) {
+        var key = s.siid + '.' + s.piid;
+        detailRow(panes.sns, (s.service ? s.service + ' ' : '') + (s.name || key),
+          fmtDetailValue(s, values[key], '是', '否'));
+      });
     }
+
+    // —— 配置页签 ——
+    function addKv(k, v) { detailRow(panes.cfg, k, v); }
     addKv('设备ID', d.did || '—');
     addKv('型号', d.model || '—');
     addKv('云端可见', d.available === false ? '否' : '是');
     addKv('实时在线', d.online === true ? '在线' : (d.online === false ? '离线' : '未知'));
-    addKv('可控', ctlCount ? '是' : '否');
+    addKv('可控', controls.length ? '是' : '否');
     addKv('不可控原因', d.reason_text || d.reason || '—');
     addKv('通信路径', h ? ((h.path || '—') + (h.path_detail ? ' · ' + h.path_detail : '')) : '—');
+    if (detail && detail.values_source) {
+      addKv('实时值来源', detail.values_source === 'lan' ? '局域网直连'
+        : detail.values_source === 'cloud' ? '云端'
+        : '不可达' + (detail.values_error ? '：' + detail.values_error : ''));
+      if (detail.values_at) addKv('读取时间', fmtDateTime(detail.values_at));
+    }
 
     // 默认选中第一个页签
     tabs.children[0].className = 'tab tab--on';

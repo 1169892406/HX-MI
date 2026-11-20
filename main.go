@@ -480,6 +480,8 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		return deviceInfoTool(ctx, args)
 	case "health_list":
 		return healthListTool(ctx)
+	case "device_detail":
+		return deviceDetailTool(ctx, args)
 	case "cred_check":
 		return credCheckTool(ctx)
 	case "ir_probe":
