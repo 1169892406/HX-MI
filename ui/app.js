@@ -1487,17 +1487,24 @@
   function detailCard(pane, title, count, hint) {
     var card = document.createElement('div');
     card.className = 'dcard';
-    var hd = document.createElement('div');
-    hd.className = 'dcard__hd';
-    var t = document.createElement('span');
-    t.className = 'dcard__title';
-    t.textContent = title;
-    hd.appendChild(t);
-    var badge = document.createElement('span');
-    badge.className = 'dcard__count';
-    badge.textContent = String(count);
-    hd.appendChild(badge);
-    card.appendChild(hd);
+    /*
+     * 标题只在**没有页签**时才画（2026-11-21 用户裁定：三个页签并排、点击切换）。
+     * 页签已经写着「控制 (1) / 传感器 (1) / 配置 (1)」，卡片里再写一遍同一个标题
+     * 就是同一句话说两遍 —— 页签在场时传空 title，只留行。
+     */
+    if (title) {
+      var hd = document.createElement('div');
+      hd.className = 'dcard__hd';
+      var t = document.createElement('span');
+      t.className = 'dcard__title';
+      t.textContent = title;
+      hd.appendChild(t);
+      var badge = document.createElement('span');
+      badge.className = 'dcard__count';
+      badge.textContent = String(count);
+      hd.appendChild(badge);
+      card.appendChild(hd);
+    }
     if (hint) {
       var h = document.createElement('p');
       h.className = 'dcard__hint';
@@ -1718,7 +1725,7 @@
       pErr.textContent = '读取失败：' + detail.error;
       panes.ctl.appendChild(pErr);
     } else {
-      var ctlCard = detailCard(panes.ctl, '控制', controls.length);
+      var ctlCard = detailCard(panes.ctl, '', controls.length);
       controls.forEach(function (c) {
         if (c.kind === 'action') {
           detailItem(ctlCard, dtIconOf(c), c.name || c.instance_id, '按钮 · 平台设备页下发', true);
@@ -1753,7 +1760,7 @@
       sNone.textContent = '规格里没有只读传感器属性。';
       panes.sns.appendChild(sNone);
     } else {
-      var snsCard = detailCard(panes.sns, '传感器', sensors.length);
+      var snsCard = detailCard(panes.sns, '', sensors.length);
       sensors.forEach(function (sn) {
         var key = sn.siid + '.' + sn.piid;
         var raw = values[key];
@@ -1764,7 +1771,7 @@
 
     // —— 配置页签：辅助开关卡在上，设备信息卡在下 ——
     if (auxSwitches.length) {
-      var auxCard = detailCard(panes.cfg, '配置', auxSwitches.length);
+      var auxCard = detailCard(panes.cfg, '', auxSwitches.length);
       auxSwitches.forEach(function (c) {
         var key = c.siid + '.' + c.piid;
         var raw = values[key];
