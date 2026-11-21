@@ -350,9 +350,23 @@ body {
 .stat--ok b { color: var(--ok); }
 .stat--warn b { color: var(--warn); }
 
-.devgrid { display: grid; grid-template-columns: 300px 1fr; gap: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+/*
+ * 左右两栏自适应（2026-11-21 用户：「UI 左右两侧没有自适应」）。
+ *
+ * 原来写死 `300px 1fr`：窄窗口下列表不肯让、详情被压成一条缝。
+ * 现在：列表列用 minmax 弹性（最窄 200px、最宽 300px），详情列 `minmax(0,1fr)`
+ * —— `minmax(0,…)` 是关键，否则子元素的最小内容宽度会把网格撑破。
+ * <760px 时直接堆叠（列表在上、详情在下），不再硬挤两列。
+ */
+.devgrid { display: grid; grid-template-columns: minmax(200px, 300px) minmax(0, 1fr); gap: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .devlist { max-height: 380px; overflow-y: auto; border-right: 1px solid var(--line); }
 .devlist > p, .devdetail > p { padding: 16px; margin: 0; }
+.devdetail { min-width: 0; overflow: hidden; }
+@media (max-width: 760px) {
+  .devgrid { grid-template-columns: minmax(0, 1fr); }
+  .devlist { border-right: none; border-bottom: 1px solid var(--line); max-height: 260px; }
+  #health-grid { grid-template-columns: minmax(0, 1fr) !important; }
+}
 .devi {
   display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer;
   border-bottom: 1px solid var(--line); transition: background .12s;
@@ -463,7 +477,23 @@ body {
 }
 .dbtn:hover { background: var(--accent-weak2, rgba(76,141,255,.22)); }
 .dbtn:disabled { opacity: .55; cursor: progress; }
-.dslider { flex: 0 1 140px; min-width: 80px; accent-color: var(--accent); }
+/*
+ * 滑杆（2026-11-21 用户：「右侧滑动按钮没有声明平台滑动」）。
+ *
+ * 插件页在 iframe 里，宿主页面是滚动容器：不声明 touch-action，拖动会被判成
+ * 页面滚动 —— 手指按下去页面跟着动、滑杆纹丝不动。这里：
+ *   · touch-action: none  → 手势归滑杆，不再冒泡成滚动；
+ *   · overscroll-behavior: contain → 拖到两端不把滚动传给外层；
+ *   · 高度 28px 给足触摸热区（默认 16px 太细，指头按不准）。
+ * 同时保留原生 range 语义（可键盘方向键、可读屏）。
+ */
+.dslider {
+  flex: 1 1 120px; min-width: 90px; height: 28px;
+  accent-color: var(--accent);
+  touch-action: none;
+  overscroll-behavior: contain;
+  cursor: pointer;
+}
 .dslider__val { flex: 0 0 auto; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px; }
 
 /* 可点击开关（2026-11-21：「控制和配置要真实可以点击的」）。

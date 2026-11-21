@@ -1751,6 +1751,7 @@
         var applied = data.read_back;
         if (typeof applied !== 'boolean') applied = next;
         values[key] = applied;
+        commitDetailValue(detailTarget.did, c.siid, c.piid, applied);
         sw.classList.toggle('is-on', applied);
         sw.setAttribute('aria-pressed', applied ? 'true' : 'false');
         sw.title = applied ? '点一下关闭' : '点一下打开';
@@ -1890,6 +1891,7 @@
           return;
         }
         values[key] = v;
+        commitDetailValue(detailTarget.did, c.siid, c.piid, v);
         var via = data.via === 'lan' ? '局域网' : '云端';
         banner('已下发：' + (c.name || '') + ' → ' + fmtDetailValue(c, v) + '（' + via + '）', 'ok');
       }).catch(function (e) {
@@ -1907,6 +1909,26 @@
     row.appendChild(btn);
     card.appendChild(row);
     return row;
+  }
+
+  /**
+   * 下发成功后把新值写回**详情缓存**并重画当前容器（2026-11-21 用户：
+   * 「状态变了，但是页面状态还是开启的」）。
+   *
+   * 之前只改了那一颗开关的 class，没有动 `devDetailCache`：一旦详情因为别的
+   * 原因重渲染（切页签、重新选设备、后台刷新回来），界面上又按**旧缓存值**画，
+   * 用户看到的就是"设备已经变了，页面还显示原来的状态"。缓存在这里是唯一真相，
+   * 改了设备就必须改它，否则界面和事实各自成立、互相对不上。
+   */
+  function commitDetailValue(did, siid, piid, value) {
+    if (!did) return;
+    var key = siid + '.' + piid;
+    var data = devDetailCache[did];
+    if (!data || typeof data !== 'object' || data.error) return;
+    var values = data.values && typeof data.values === 'object' ? data.values : {};
+    values[key] = value;
+    data.values = values;
+    putDetailCache(did, data);
   }
 
   /** 行图标（内联 SVG，不用 emoji：跨平台渲染差异太大）。 */
