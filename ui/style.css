@@ -383,6 +383,57 @@ body {
   border-bottom: 1px solid var(--line); font-size: 13px;
 }
 .kv__row:last-child { border-bottom: none; }
+/* ── 详情页三卡片（2026-11-21 用户拿 HA 对照：「三个独立的页面独立的显示几个能力数」）──
+   每张卡：标题 + 计数徽标，行 = 图标 | 名称 | 右侧当前值。
+   插件页不下发命令，右侧只呈现状态（开关显示 开/关，读数显示数值+单位）。 */
+.dcard {
+  border: 1px solid var(--line); border-radius: var(--r-md, 12px);
+  background: var(--card); margin-bottom: 12px; overflow: hidden;
+}
+.dcard__hd {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px 10px;
+}
+.dcard__title { font-size: 15px; font-weight: 700; }
+.dcard__count {
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px;
+  display: inline-grid; place-items: center;
+  font-size: 11.5px; font-weight: 700;
+  color: var(--accent); background: var(--accent-soft, rgba(124,92,255,.14));
+}
+.dcard__hint { margin: 0 14px 8px; font-size: 12px; color: var(--muted); }
+.ditem {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-top: 1px solid var(--line);
+}
+.ditem__ico {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: 9px;
+  display: grid; place-items: center;
+  color: var(--accent); background: var(--accent-soft, rgba(124,92,255,.14));
+}
+.ditem__name { flex: 1 1 auto; min-width: 0; font-size: 13.5px; overflow-wrap: anywhere; }
+.ditem__val {
+  flex: 0 0 auto; font-size: 15px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ditem__val.is-empty { color: var(--muted); font-weight: 600; }
+.ditem__val--text { font-size: 13px; font-weight: 500; color: var(--muted); max-width: 58%; text-align: right; overflow-wrap: anywhere; }
+
+/* 传感器 / 辅助开关卡片：名称在上、数值在下（2026-11-21 用户裁定）。
+
+   用户原话：「图二传感器在上方啊数据在下方啊」—— 之前用 kv 行（名左值右），
+   读数被挤成一行，和 HA 的传感器卡片不一致。这里改成上下两行：
+   名称 12.5px 次要色，数值 20px 加粗 + 单位。 */
+.dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.dcell {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 14px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--card);
+}
+.dcell__k { font-size: 12.5px; color: var(--muted); }
+.dcell__v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.dcell__v.is-empty { color: var(--muted); font-weight: 600; }
+
 .kv__k { color: var(--muted); font-size: 12.5px; }
 .kv__v { min-width: 0; word-break: break-all; }
 

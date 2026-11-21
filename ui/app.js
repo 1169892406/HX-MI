@@ -1472,6 +1472,92 @@
       });
   }
 
+  /*
+   * 详情页三块**独立卡片**（2026-11-21 用户拿 HA 对照：「三个独立的页面独立的
+   * 显示几个能力数」）：
+   *
+   *   控制 ─ 图标 + 名称 + 右侧开关/读数      （只放主开关、动作、数值）
+   *   传感器 ─ 图标 + 名称 + 右侧读数          （只读）
+   *   配置 ─ 辅助开关行 + 设备信息卡
+   *
+   * 每个页签里是一张卡：`detailCard` 出「标题 + 计数」的头，`detailItem` 出行。
+   * 插件页不下发设备命令，所以右侧只呈现当前状态（命令在平台设备页下发）——
+   * 不画一个点了没反应的开关。
+   */
+  function detailCard(pane, title, count, hint) {
+    var card = document.createElement('div');
+    card.className = 'dcard';
+    var hd = document.createElement('div');
+    hd.className = 'dcard__hd';
+    var t = document.createElement('span');
+    t.className = 'dcard__title';
+    t.textContent = title;
+    hd.appendChild(t);
+    var badge = document.createElement('span');
+    badge.className = 'dcard__count';
+    badge.textContent = String(count);
+    hd.appendChild(badge);
+    card.appendChild(hd);
+    if (hint) {
+      var h = document.createElement('p');
+      h.className = 'dcard__hint';
+      h.textContent = hint;
+      card.appendChild(h);
+    }
+    pane.appendChild(card);
+    return card;
+  }
+
+  /** 卡片里的一行：图标 | 名称 | 右侧值。icon 取 dtIcon() 的键。 */
+  function detailItem(card, icon, name, value, empty) {
+    var row = document.createElement('div');
+    row.className = 'ditem';
+    var ic = document.createElement('span');
+    ic.className = 'ditem__ico';
+    ic.innerHTML = dtIcon(icon);
+    var nm = document.createElement('span');
+    nm.className = 'ditem__name';
+    nm.textContent = name;
+    var vl = document.createElement('span');
+    vl.className = 'ditem__val' + (empty ? ' is-empty' : '');
+    vl.textContent = value;
+    row.appendChild(ic);
+    row.appendChild(nm);
+    row.appendChild(vl);
+    card.appendChild(row);
+    return row;
+  }
+
+  /** 行图标（内联 SVG，不用 emoji：跨平台渲染差异太大）。 */
+  function dtIcon(kind) {
+    var paths = {
+      power: '<path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 1 0 11.2 0"/>',
+      bulb: '<path d="M9 18h6"/><path d="M10 21h4"/><path d="M8 14a4 4 0 1 1 8 0c0 1.6-1 2.3-1.6 3.2H9.6C9 16.3 8 15.6 8 14z"/>',
+      thermo: '<path d="M10 4a2 2 0 1 1 4 0v9a3 3 0 1 1-4 0V4z"/><path d="M12 8v6"/>',
+      slider: '<path d="M4 8h10M18 8h2M4 16h4M12 16h8"/><circle cx="16" cy="8" r="2.2"/><circle cx="10" cy="16" r="2.2"/>',
+      button: '<rect x="4" y="7" width="16" height="10" rx="5"/><path d="M9 12h6"/>',
+      info: '<circle cx="12" cy="12" r="8"/><path d="M12 8v.5M12 11v5"/>'
+    };
+    return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + (paths[kind] || paths.button) + '</svg>';
+  }
+
+  /** 控件 → 图标：开关看是不是主开关，数值看滑杆，动作看按钮。 */
+  function dtIconOf(c) {
+    if (c.kind === 'action') return 'button';
+    if (c.capability === 'number') return 'slider';
+    if (c.primary === true) return 'power';
+    return 'bulb';
+  }
+
+  /** 传感器 → 图标：温度/湿度优先，其余用通用读数图标。 */
+  function dtIconOfSensor(sn) {
+    var n = String((sn && sn.name) || '');
+    if (/温度|温度|temp/i.test(n)) return 'thermo';
+    if (/湿度|humid/i.test(n)) return 'thermo';
+    return 'thermo';
+  }
+
   /** 详情页里的一行「名 | 值」（复用 kv 行样式）。 */
   function detailRow(pane, k, v) {
     var row = document.createElement('div');
@@ -1485,6 +1571,34 @@
     row.appendChild(kEl);
     row.appendChild(vEl);
     pane.appendChild(row);
+  }
+
+  /**
+   * 配置页签里的辅助开关（指示灯开关 / 麦克风静音 / 睡眠模式…）。
+   *
+   * 布局与「控制」里的主开关一致：图标位 + 名称 + 当前值。插件页不下发命令
+   * （命令在平台设备页），所以这里只呈现状态。
+   */
+  function panelsConfigToggles(pane, items, values) {
+    var grid = document.createElement('div');
+    grid.className = 'dgrid';
+    items.forEach(function (c) {
+      var key = c.siid + '.' + c.piid;
+      var card = document.createElement('div');
+      card.className = 'dcell';
+      var nm = document.createElement('span');
+      nm.className = 'dcell__k';
+      nm.textContent = c.name || key;
+      var vl = document.createElement('span');
+      vl.className = 'dcell__v';
+      var raw = values[key];
+      vl.textContent = fmtDetailValue(c, raw);
+      if (raw === undefined || raw === null) vl.className = 'dcell__v is-empty';
+      card.appendChild(nm);
+      card.appendChild(vl);
+      grid.appendChild(card);
+    });
+    pane.appendChild(grid);
   }
 
   function renderDetail() {
@@ -1525,9 +1639,25 @@
     var dkey = d.did || d.name || '';
     loadDeviceDetail(d);
     var detail = devDetailCache[dkey];
-    var controls = (detail && detail.controls) || [];
+    var allControls = (detail && detail.controls) || [];
     var sensors = (detail && detail.sensors) || [];
     var values = (detail && detail.values) || {};
+    /*
+     * 三栏归属（2026-11-21 用户裁定，与 HA / 平台设备详情同一口径）：
+     *   · 控制 = 主开关（primary）+ 动作按钮 + 数值控件
+     *   · 配置 = 辅助开关（指示灯开关 / 麦克风静音 / 睡眠模式…）+ 设备信息
+     *   · 传感器 = 只读读数
+     * 之前的实现把**所有**可写开关都塞进控制，台灯因此出现两个开关；
+     * 用户明确：「控制应该只有开关」「配置里放指示灯开关」。
+     */
+    var controls = allControls.filter(function (c) {
+      if (c.kind === 'action') return true;
+      if (c.capability === 'number') return true;
+      return c.primary === true;
+    });
+    var auxSwitches = allControls.filter(function (c) {
+      return c.kind !== 'action' && c.capability === 'switch' && c.primary !== true;
+    });
 
     var tabs = document.createElement('div');
     tabs.className = 'tabs';
@@ -1535,7 +1665,7 @@
     var defs = [
       { key: 'ctl', label: detail ? ('控制 (' + controls.length + ')') : '控制 (…)' },
       { key: 'sns', label: detail ? ('传感器 (' + sensors.length + ')') : '传感器 (…)' },
-      { key: 'cfg', label: '配置' }
+      { key: 'cfg', label: detail ? ('配置 (' + auxSwitches.length + ')') : '配置 (…)' }
     ];
     defs.forEach(function (def) {
       var tabBtn = document.createElement('button');
@@ -1588,14 +1718,15 @@
       pErr.textContent = '读取失败：' + detail.error;
       panes.ctl.appendChild(pErr);
     } else {
+      var ctlCard = detailCard(panes.ctl, '控制', controls.length);
       controls.forEach(function (c) {
         if (c.kind === 'action') {
-          detailRow(panes.ctl, c.name || c.instance_id, '按钮 · 平台设备页下发');
+          detailItem(ctlCard, dtIconOf(c), c.name || c.instance_id, '按钮 · 平台设备页下发', true);
           return;
         }
         var key = c.siid + '.' + c.piid;
         var v = values[key];
-        detailRow(panes.ctl, c.name || key, fmtDetailValue(c, v));
+        detailItem(ctlCard, dtIconOf(c), c.name || key, fmtDetailValue(c, v), v === undefined || v === null);
       });
     }
     var pathP = document.createElement('p');
@@ -1622,15 +1753,49 @@
       sNone.textContent = '规格里没有只读传感器属性。';
       panes.sns.appendChild(sNone);
     } else {
-      sensors.forEach(function (s) {
-        var key = s.siid + '.' + s.piid;
-        detailRow(panes.sns, (s.service ? s.service + ' ' : '') + (s.name || key),
-          fmtDetailValue(s, values[key], '是', '否'));
+      var snsCard = detailCard(panes.sns, '传感器', sensors.length);
+      sensors.forEach(function (sn) {
+        var key = sn.siid + '.' + sn.piid;
+        var raw = values[key];
+        detailItem(snsCard, dtIconOfSensor(sn), sn.name || key,
+          fmtDetailValue(sn, raw, '是', '否'), raw === undefined || raw === null);
       });
     }
 
-    // —— 配置页签 ——
-    function addKv(k, v) { detailRow(panes.cfg, k, v); }
+    // —— 配置页签：辅助开关卡在上，设备信息卡在下 ——
+    if (auxSwitches.length) {
+      var auxCard = detailCard(panes.cfg, '配置', auxSwitches.length);
+      auxSwitches.forEach(function (c) {
+        var key = c.siid + '.' + c.piid;
+        var raw = values[key];
+        detailItem(auxCard, dtIconOf(c), c.name || key, fmtDetailValue(c, raw), raw === undefined || raw === null);
+      });
+    }
+    var kvCard = document.createElement('div');
+    kvCard.className = 'dcard';
+    var kvHd = document.createElement('div');
+    kvHd.className = 'dcard__hd';
+    var kvT = document.createElement('span');
+    kvT.className = 'dcard__title';
+    kvT.textContent = '设备信息';
+    kvHd.appendChild(kvT);
+    kvCard.appendChild(kvHd);
+    panes.cfg.appendChild(kvCard);
+    function addKv(k, v) {
+      var row = document.createElement('div');
+      row.className = 'ditem';
+      var ic = document.createElement('span');
+      ic.className = 'ditem__ico';
+      ic.innerHTML = dtIcon('info');
+      var nm = document.createElement('span');
+      nm.className = 'ditem__name';
+      nm.textContent = k;
+      var vl = document.createElement('span');
+      vl.className = 'ditem__val ditem__val--text';
+      vl.textContent = v;
+      row.appendChild(ic); row.appendChild(nm); row.appendChild(vl);
+      kvCard.appendChild(row);
+    }
     addKv('设备ID', d.did || '—');
     addKv('型号', d.model || '—');
     addKv('云端可见', d.available === false ? '否' : '是');

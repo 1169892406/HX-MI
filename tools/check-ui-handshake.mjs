@@ -209,8 +209,8 @@ const ACCOUNT_VIEW = {
 const DEVICE_DETAIL_OK = {
   did: '100', name: '台灯', model: 'chuangmi.plug.m3', host: '192.168.1.62',
   controls: [
-    { capability: 'switch', instance_id: '2.1', name: '开关', group: '灯', kind: 'prop', siid: 2, piid: 1, format: 'bool' },
-    { capability: 'switch', instance_id: '3.1', name: '指示灯 开关', group: '指示灯', kind: 'prop', siid: 3, piid: 1, format: 'bool' },
+    { capability: 'switch', instance_id: '2.1', name: '开关', group: '灯', kind: 'prop', siid: 2, piid: 1, format: 'bool', primary: true },
+    { capability: 'switch', instance_id: '3.1', name: '指示灯 开关', group: '指示灯', kind: 'prop', siid: 3, piid: 1, format: 'bool', primary: false },
   ],
   sensors: [
     { siid: 2, piid: 2, name: '温度', format: 'float', unit: 'c', service: '环境' },
@@ -335,15 +335,15 @@ console.log('== U19 回来的数据真的能渲染');
   ok('U19o 详情页发出 device_detail 请求', ddOps.includes('device_detail'),
     `实际请求过的工具：${ddOps.join(',')}`);
   const ddText = collectText(getEl('dev-detail'));
-  ok('U19p 控制页签渲染出开关与指示灯（含实时值）',
+  ok('U19p 开关在控制、指示灯开关在配置（辅助开关不进控制）',
     ddText.includes('开关') && ddText.includes('指示灯 开关'),
     `实际：${ddText.slice(0, 200)}`);
   ok('U19q 传感器页签渲染出温度实时值（28.4 c）',
     ddText.includes('温度') && ddText.includes('28.4 c'),
     `实际：${ddText.slice(0, 200)}`);
-  ok('U19r 详情页签计数用真实规格（控制 (2) / 传感器 (1)）',
-    ddText.includes('控制 (2)') && ddText.includes('传感器 (1)'),
-    `实际：${ddText.slice(0, 120)}`);
+  ok('U19r 页签计数：控制只算主开关（控制 (1) / 传感器 (1) / 配置 (1)）',
+    ddText.includes('控制 (1)') && ddText.includes('传感器 (1)') && ddText.includes('配置 (1)'),
+    `实际：${ddText.slice(0, 160)}`);
   ok('U19s 实时值来源如实标注（局域网直连）',
     ddText.includes('局域网直连'),
     'values_source 必须透出，读不到时不许装作有值');

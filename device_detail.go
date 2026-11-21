@@ -146,6 +146,17 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 		}
 	}
 	// 可写属性 → 控件（bool→switch、数值→number），口径与 specControls 一致。
+	/*
+	 * 主开关（2026-11-21 用户裁定「控制应该只有开关」「指示灯开关归配置」）：
+	 * MIoT 里"主开关"就是第一个可写可读的 bool 属性（属性名 `on`，通常在
+	 * service 2）。它进「控制」页签；其余可写 bool（指示灯开关 / 麦克风静音 /
+	 * 睡眠模式…）是**辅助开关**，进「配置」页签 —— 与 HA 的
+	 * entity_category=config 一致，也与平台设备详情同一口径。
+	 *
+	 * 只认**第一个** `on`：台灯规格里 service 2（主开关）与 service 3（指示灯）
+	 * 都叫 `on`，全当主开关会让"控制"里出现两个开关（正是用户这次指出的问题）。
+	 */
+	primaryTaken := false
 	nameCount := map[string]int{}
 	for _, svc := range sp.Services {
 		if svc.IID == 1 {
@@ -167,13 +178,18 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 			}
 			name := firstNonEmptyStr(pr.Name, humanizeURN(pr.Type))
 			nameCount[name]++
+			primary := false
+			if cap == "switch" && !primaryTaken && (actionNameOf(pr.Type) == "on" || strings.TrimSpace(pr.Name) == "开关") {
+				primary = true
+				primaryTaken = true
+			}
 			controls = append(controls, map[string]any{
 				"capability":  cap,
 				"instance_id": fmt.Sprintf("%d.%d", svc.IID, pr.IID),
 				"name":        name, "group": svcName, "kind": "prop",
 				"siid": svc.IID, "piid": pr.IID, "format": pr.Format, "unit": pr.Unit,
+				"primary": primary,
 			})
-			_ = svcName
 		}
 	}
 	// 重名消歧（同 specControls）：台灯的两个「开关」→「开关」/「指示灯 开关」。
