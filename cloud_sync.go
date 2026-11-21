@@ -119,6 +119,18 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 	defer syncInFlight.Store(false)
 	summary := map[string]int{"cloud": 0, "added": 0, "updated": 0, "announced": 0, "tokens": 0, "failed": 0}
 
+	/*
+	 * 同步的墙钟预算（2026-11-21）。
+	 *
+	 * 宿主按 installation 的 execution_timeout_ms（30s）杀模块，插件必须自己
+	 * 先守住这个预算 —— 否则"某一轮慢"升级成"实例被判死"（用户看到
+	 * 「读取账号失败：沙箱实例已不可用」）。这里取 20s 作为软上限：留 10s 给
+	 * 返回值序列化与宿主侧开销，任何"读状态"的循环到了预算就停手，
+	 * 本轮先把已读到的结果落盘/上报，剩下的下一轮继续。
+	 */
+	syncDeadline := time.Now().Add(20 * time.Second)
+	overBudget := func() bool { return time.Now().After(syncDeadline) }
+
 	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
 	if err != nil {
 		recordSyncFailure(ctx, err)
@@ -285,7 +297,7 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 			Capabilities: ds[index[external]].Capabilities, Available: &avail,
 			// 规格驱动的控件明细（2026-11-17）：平台据此渲染"麦克风静音/停止闹钟"
 			// 这类**命名**控件，而不是一个笼统的"开关/按下"。
-			Attributes: map[string]any{"controls": specControls(ctx, c.Model)},
+			Attributes: map[string]any{"controls": specControlsCached(ctx, c.Model)},
 		}); err != nil {
 			/*
 			 * ⚠ 必须记下**原因**（2026-11-10 用户实测"设备没进待绑定列表"）。
@@ -346,7 +358,9 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 		if isSensorLikeModel(c.Model) || isMedia {
 			if isMedia || strings.TrimSpace(c.LocalIP) != "" {
 				limit := statePollBudget(len(ds))
-				pollSensor = summary["states"] < limit
+				// 到预算就停止读状态：宁可这一轮少读几台，也不能撞宿主执行时限
+				// （2026-11-21：撞上限 = 模块被杀 = 整轮同步白做 + 实例判死）。
+				pollSensor = summary["states"] < limit && !overBudget()
 			}
 		}
 		if pollSensor && isMedia {
@@ -669,6 +683,41 @@ func specControls(ctx *plugin.Context, model string) []map[string]any {
 	if err != nil {
 		return nil
 	}
+	return buildSpecControls(ctx, model, sp)
+}
+
+/*
+ * specControlsCached 是 specControls 的**只读缓存**版本：规格不在本地缓存里就
+ * 返回 nil，**绝不联网**。
+ *
+ * ## 为什么必须分开（2026-11-21 实测「沙箱实例已不可用（closed）」）
+ *
+ * 云同步是个 30 秒预算内的调用：一台设备一次 `loadMIoTSpec` 在缓存缺失时会去
+ * miot-spec.org 拉规格（单次上限 15s），家里十几台新设备 ⇒ 一次同步轻松撞满
+ * 30s ⇒ 宿主按 execution_timeout 杀掉模块 ⇒ 整轮同步失败、实例判死。
+ * 日志里那条 `reason: module closed with context deadline exceeded`（每 5 分钟
+ * 同步一轮出现一次）就是它。
+ *
+ * 同步的职责是"把设备登记进来"，不是"顺手把全世界规格都下完"：
+ *   · 缓存里有 ⇒ 带上控件明细（平台立刻能渲染命名控件）；
+ *   · 缓存里没有 ⇒ 这一轮先不带，等用户点开设备详情/设置时由
+ *     `device_detail`（交互式调用，用户预期等待）去拉并落缓存。
+ *
+ * 这样同步的耗时与设备数线性但**没有网络长尾**，不会再撞执行预算。
+ */
+func specControlsCached(ctx *plugin.Context, model string) []map[string]any {
+	if _, ok := lookupModelType(model); !ok {
+		return nil
+	}
+	sp, ok := readCachedSpec(ctx, "spec-cache/"+safeModel(model)+".json", model)
+	if !ok || len(sp.Services) == 0 {
+		return nil
+	}
+	return buildSpecControls(ctx, model, sp)
+}
+
+func buildSpecControls(ctx *plugin.Context, model string, sp miotSpec) []map[string]any {
+	_ = model
 	out := []map[string]any{}
 	// onTaken 记录已占用"能力名"作为实例名的能力（每个能力只允许一个主实例）
 	onTaken := map[string]bool{}
