@@ -399,6 +399,14 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		return json.Marshal(map[string]any{"started": true})
 	case "login":
 		return startLogin(ctx, args)
+	case "qr_start":
+		return qrStartTool(ctx, args)
+	case "qr_status":
+		return qrStatusTool(ctx, args)
+	case "qr_cancel":
+		return qrCancelTool(ctx, args)
+	case "qr_svg":
+		return qrSVGTool(ctx, args)
 	case "status":
 		return loginStatus(ctx, args)
 	case "logout":

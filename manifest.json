@@ -2,7 +2,7 @@
   "schema_version": 2,
   "plugin_id": "homex.xiaomi_miot",
   "name": "HX-MI",
-  "version": "2.0.0-alpha.167",
+  "version": "2.0.0-alpha.168",
   "publisher": {
     "id": "hx-community",
     "display_name": "HX Community",
@@ -150,6 +150,22 @@
       },
       {
         "name": "device_detail",
+        "risk": "low"
+      },
+      {
+        "name": "qr_start",
+        "risk": "high"
+      },
+      {
+        "name": "qr_status",
+        "risk": "low"
+      },
+      {
+        "name": "qr_cancel",
+        "risk": "low"
+      },
+      {
+        "name": "qr_svg",
         "risk": "low"
       }
     ],
@@ -362,6 +378,10 @@
     "account_delete",
     "catalog_status",
     "catalog_refresh",
-    "lan_health"
+    "lan_health",
+    "qr_start",
+    "qr_status",
+    "qr_cancel",
+    "qr_svg"
   ]
 }
