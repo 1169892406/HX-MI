@@ -1671,8 +1671,8 @@
     var panes = {};
     var defs = [
       { key: 'ctl', label: detail ? ('控制 (' + controls.length + ')') : '控制 (…)' },
-      { key: 'sns', label: detail ? ('传感器 (' + sensors.length + ')') : '传感器 (…)' },
-      { key: 'cfg', label: detail ? ('配置 (' + auxSwitches.length + ')') : '配置 (…)' }
+      { key: 'cfg', label: detail ? ('配置 (' + auxSwitches.length + ')') : '配置 (…)' },
+      { key: 'sns', label: detail ? ('传感器 (' + sensors.length + ')') : '传感器 (…)' }
     ];
     defs.forEach(function (def) {
       var tabBtn = document.createElement('button');
@@ -1701,19 +1701,11 @@
     });
     box.appendChild(tabs);
 
-    // —— 控制页签 ——
-    var callout = document.createElement('div');
-    if (controls.length) {
-      callout.className = 'callout callout--ok';
-      callout.textContent = '✓ 规格里声明了 ' + controls.length + ' 个控制项 —— 命令经平台设备页下发，本页展示实时状态。';
-    } else if (detail && !detail.error) {
-      callout.className = 'callout callout--warn';
-      callout.textContent = '该型号规格里没有可写控制项。';
-    } else {
-      callout.className = 'callout callout--warn';
-      callout.textContent = '不可控 · ' + (d.reason_text || d.reason || '云端未声明可控能力');
-    }
-    panes.ctl.appendChild(callout);
+    /*
+     * 「页面简单点」（2026-11-21 用户）：控制页签**只列实际能力**。
+     * 原来的绿色说明条（"✓ 规格里声明了 N 个控制项…"）与底部"通信路径"都撤掉 ——
+     * 它们不是能力本身，占掉的是本该给行的地方；通信路径移到配置里的设备信息。
+     */
     if (!detail) {
       var pWait = document.createElement('p');
       pWait.className = 'muted small';
@@ -1736,12 +1728,12 @@
         detailItem(ctlCard, dtIconOf(c), c.name || key, fmtDetailValue(c, v), v === undefined || v === null);
       });
     }
-    var pathP = document.createElement('p');
-    pathP.className = 'muted small';
-    pathP.textContent = h
-      ? '通信路径：' + (h.path || '—') + (h.path_detail ? ' · ' + h.path_detail : '')
-      : '通信路径：暂无健康检查数据（点「立即检查」刷新）。';
-    panes.ctl.appendChild(pathP);
+    if (detail && !detail.error && !controls.length) {
+      var cNone = document.createElement('p');
+      cNone.className = 'muted small';
+      cNone.textContent = '该型号规格里没有可写控制项。';
+      panes.ctl.appendChild(cNone);
+    }
 
     // —— 传感器页签 ——
     if (!detail) {
@@ -1805,16 +1797,12 @@
     }
     addKv('设备ID', d.did || '—');
     addKv('型号', d.model || '—');
-    addKv('云端可见', d.available === false ? '否' : '是');
     addKv('实时在线', d.online === true ? '在线' : (d.online === false ? '离线' : '未知'));
-    addKv('可控', controls.length ? '是' : '否');
-    addKv('不可控原因', d.reason_text || d.reason || '—');
     addKv('通信路径', h ? ((h.path || '—') + (h.path_detail ? ' · ' + h.path_detail : '')) : '—');
     if (detail && detail.values_source) {
       addKv('实时值来源', detail.values_source === 'lan' ? '局域网直连'
         : detail.values_source === 'cloud' ? '云端'
         : '不可达' + (detail.values_error ? '：' + detail.values_error : ''));
-      if (detail.values_at) addKv('读取时间', fmtDateTime(detail.values_at));
     }
 
     // 默认选中第一个页签
