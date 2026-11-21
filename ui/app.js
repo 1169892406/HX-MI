@@ -667,6 +667,16 @@
     el('login-form').hidden = false;
     el('challenge').hidden = true;
     clearBanner();
+    // 每次打开都回到「账号密码」，避免上次留在扫码页、用户以为没有密码入口
+    setLoginMode('pass');
+    scheduleHeight();
+  }
+
+  /** 收起登录表单（扫码成功后复用：与「取消」同一条收尾路径）。 */
+  function hideLoginForm() {
+    cancelQrLogin();
+    el('login-form').hidden = true;
+    el('f-pass').value = '';
     scheduleHeight();
   }
 
@@ -1359,6 +1369,18 @@
     }
     fillDevHousehold();
 
+    /*
+     * 排序（2026-11-21 用户要求：「同步列表显示的时候，在线的在最前面，离线的在后面」）。
+     *
+     * 稳定排序，三档：在线(0) → 未知(1) → 离线(2)。同档保持后端返回的顺序
+     * （后端按同步顺序给，通常就是设备加入家庭的顺序），不按名字重排。
+     * 统计磁贴仍用**排序前**的原始顺序统计，数字与顺序无关。
+     */
+    list = list.slice().sort(function (a, b) {
+      function rank(d) { return d && d.online === true ? 0 : (d && d.online === false ? 2 : 1); }
+      return rank(a) - rank(b);
+    });
+
     // 设备列表
     var listBox = el('dev-list');
     listBox.innerHTML = '';
@@ -1393,6 +1415,23 @@
         pill.className = 'pill ' + (d.online === true ? 'pill--ok' : (d.online === false ? 'pill--warn' : 'pill--off'));
         pill.appendChild(document.createElement('i'));
         pill.appendChild(document.createTextNode(d.online === true ? '在线' : (d.online === false ? '离线' : '未知')));
+        /*
+         * 离线时间（2026-11-21 用户：「离线显示离线时间」）。
+         *
+         * 数据来自健康表的 offline_since（状态变化的时刻，落盘跨重启），
+         * 设备列表本身只有 online 布尔值、没有时间戳。健康数据还没到时不显示，
+         * 不拿"刚刚"凑数。
+         */
+        if (d.online === false) {
+          var hh0 = healthByName(d.name);
+          if (hh0 && hh0.offline_since) {
+            var since = document.createElement('span');
+            since.className = 'devi__since';
+            since.textContent = fmtSince(hh0.offline_since);
+            since.title = '离线自 ' + fmtDateTime(hh0.offline_since);
+            item.appendChild(since);
+          }
+        }
         item.appendChild(pill);
 
         var did = d.did || '';
@@ -1535,6 +1574,83 @@
     return row;
   }
 
+  /**
+   * 可点击的开关行（2026-11-21 用户：「控制和配置要真实可以点击的」）。
+   *
+   * 与只读行（detailItem）的区别只有一个：右侧是可点的开关，点一下**真的写设备**
+   * （走 device_switch：局域网 set_properties 优先，失败回落云端 prop/set）。
+   * 下发期间禁用防连点；成功显示横幅 + 行内提示；失败如实报错、开关保持原状态。
+   */
+  function switchRow(card, c, primary, values) {
+    var key = c.siid + '.' + c.piid;
+    var cur = values[key] === true;
+
+    var row = document.createElement('div');
+    row.className = 'ditem';
+
+    var ic = document.createElement('span');
+    ic.className = 'ditem__ico';
+    ic.innerHTML = dtIcon(dtIconOf(c));
+
+    var nm = document.createElement('div');
+    nm.className = 'ditem__name';
+    var nmMain = document.createElement('span');
+    nmMain.textContent = c.name || key;
+    nm.appendChild(nmMain);
+
+    var sw = document.createElement('button');
+    sw.type = 'button';
+    sw.className = 'dsw' + (cur ? ' is-on' : '');
+    sw.setAttribute('aria-pressed', cur ? 'true' : 'false');
+    sw.setAttribute('data-siid', String(c.siid));
+    sw.setAttribute('data-piid', String(c.piid));
+    sw.title = cur ? '点一下关闭' : '点一下打开';
+    var knob = document.createElement('span');
+    knob.className = 'dsw__knob';
+    sw.appendChild(knob);
+
+    sw.addEventListener('click', function () {
+      if (sw.disabled) return;
+      var next = !sw.classList.contains('is-on');
+      sw.disabled = true;
+      sw.classList.add('is-busy');
+      rpc('plugin.tool.call', {
+        tool: 'device_switch',
+        args: { did: devSelDid, siid: c.siid, piid: c.piid, value: next, primary: !!primary }
+      }).then(function (res) {
+        var data = failed(res) ? null : (res && res.data !== undefined ? res.data : res);
+        if (!data || data.ok === false) {
+          var msg = (data && (data.error || data.message)) || (failed(res) ? failText(res) : '下发失败');
+          banner('『' + (c.name || key) + '』下发失败：' + msg, 'err');
+          scheduleHeight();
+          return;
+        }
+        var applied = data.read_back;
+        if (typeof applied !== 'boolean') applied = next;
+        values[key] = applied;
+        sw.classList.toggle('is-on', applied);
+        sw.setAttribute('aria-pressed', applied ? 'true' : 'false');
+        sw.title = applied ? '点一下关闭' : '点一下打开';
+        var viaText = data.via === 'lan' ? '局域网' : '云端';
+        var ms = typeof data.latency_ms === 'number' ? ' ' + data.latency_ms + 'ms' : '';
+        banner('已下发：' + (c.name || key) + ' → ' + (applied ? '开' : '关') + '（' + viaText + ms + '）', 'ok');
+        scheduleHeight();
+      }).catch(function (e) {
+        banner('『' + (c.name || key) + '』下发失败：' + errText(e), 'err');
+        scheduleHeight();
+      }).then(function () {
+        sw.disabled = false;
+        sw.classList.remove('is-busy');
+      });
+    });
+
+    row.appendChild(ic);
+    row.appendChild(nm);
+    row.appendChild(sw);
+    card.appendChild(row);
+    return row;
+  }
+
   /** 行图标（内联 SVG，不用 emoji：跨平台渲染差异太大）。 */
   function dtIcon(kind) {
     var paths = {
@@ -1624,22 +1740,12 @@
       return;
     }
 
-    var hd = document.createElement('div');
-    hd.className = 'dd__hd';
-    var b = document.createElement('b');
-    b.textContent = d.name || '未命名';
-    hd.appendChild(b);
-    var pill = document.createElement('span');
-    pill.className = 'pill ' + (d.online === true ? 'pill--ok' : (d.online === false ? 'pill--warn' : 'pill--off'));
-    pill.appendChild(document.createElement('i'));
-    pill.appendChild(document.createTextNode(d.online === true ? '在线' : (d.online === false ? '离线' : '未知')));
-    hd.appendChild(pill);
-    box.appendChild(hd);
-
-    var meta = document.createElement('p');
-    meta.className = 'dd__meta';
-    meta.textContent = '型号 ' + (d.model || '—') + ' · 设备ID ' + (d.did || '—');
-    box.appendChild(meta);
+    /*
+     * 顶部标题块已删（2026-11-21 用户：「这部分删除吧，控制 配置 传感器放在这里」）。
+     *
+     * 设备名与在线状态左列表已有，型号/设备ID 收进「配置 → 设备信息」，
+     * 所以右侧第一行直接就是三个页签，顶到最上。信息没有丢，只是不再重复占位。
+     */
 
     var h = healthByName(d.name);
     // 详情数据：缓存命中直接用；没有就懒加载（回来重渲染）。
@@ -1724,6 +1830,10 @@
           return;
         }
         var key = c.siid + '.' + c.piid;
+        if (c.capability === 'switch' && typeof values[key] === 'boolean') {
+          switchRow(ctlCard, c, true, values);
+          return;
+        }
         var v = values[key];
         detailItem(ctlCard, dtIconOf(c), c.name || key, fmtDetailValue(c, v), v === undefined || v === null);
       });
@@ -1767,6 +1877,10 @@
       auxSwitches.forEach(function (c) {
         var key = c.siid + '.' + c.piid;
         var raw = values[key];
+        if (typeof raw === 'boolean') {
+          switchRow(auxCard, c, false, values);
+          return;
+        }
         detailItem(auxCard, dtIconOf(c), c.name || key, fmtDetailValue(c, raw), raw === undefined || raw === null);
       });
     }
@@ -1807,6 +1921,145 @@
 
     // 默认选中第一个页签
     tabs.children[0].className = 'tab tab--on';
+    scheduleHeight();
+  }
+
+  /* ── 扫码登录（2026-11-21）────────────────────────────────
+   *
+   * 用户：「HX-MI 我用其他任务写入了二维码登录怎么没上线啊」——
+   * 后端工具（qr_start / qr_status / qr_cancel / qr_svg）早就有了，缺的是入口。
+   *
+   * # 流程
+   *
+   *   点「生成二维码」→ qr_svg（一次调用直接把 SVG 拿回来，省一次 qr_start）
+   *   → 每 2 秒 qr_status → state=ok 时账号已写好，刷新账号列表并收起表单
+   *
+   * # 为什么轮询放在前端而不是插件里长轮询
+   *
+   * 插件是单线程 wasm：一个长轮询会把整只实例占住，期间任何工具调用（包括用户
+   * 自己点刷新）都得排队。前端 2 秒一次短轮询，每次都是毫秒级返回，更稳。
+   */
+  var qrTimer = null;
+  var qrSeq = 0;
+
+  function stopQrPolling() {
+    if (qrTimer) {
+      clearTimeout(qrTimer);
+      qrTimer = null;
+    }
+    qrSeq += 1; // 让在途的轮询结果作废
+  }
+
+  function setQrState(text, kind) {
+    var p = el('qr-state');
+    if (!p) return;
+    p.textContent = text;
+    p.className = 'small ' + (kind === 'err' ? 'err' : (kind === 'ok' ? 'ok' : 'muted'));
+  }
+
+  function renderQrSvg(svg) {
+    var box = el('qr-img');
+    if (!box) return;
+    box.className = 'qrbox__img';
+    box.innerHTML = svg; // 插件自己生成的 SVG（无脚本），只在此处 innerHTML
+  }
+
+  function startQrLogin() {
+    stopQrPolling();
+    var btn = el('btn-qr-start');
+    var cancel = el('btn-qr-cancel');
+    if (btn) btn.disabled = true;
+    setQrState('正在获取二维码…');
+    rpc('plugin.tool.call', { tool: 'qr_svg', args: {} })
+      .then(function (res) {
+        var data = failed(res) ? null : (res && res.data !== undefined ? res.data : res);
+        if (!data || !data.svg) {
+          setQrState('二维码获取失败：' + ((data && (data.error || data.message)) || failText(res) || '未知错误'), 'err');
+          if (btn) btn.disabled = false;
+          return;
+        }
+        renderQrSvg(data.svg);
+        setQrState('等待扫码…（手机上确认后这里会自动完成）');
+        if (cancel) cancel.hidden = false;
+        pollQr(++qrSeq);
+      })
+      .catch(function (e) {
+        setQrState('二维码获取失败：' + errText(e), 'err');
+        if (btn) btn.disabled = false;
+      });
+  }
+
+  function pollQr(seq) {
+    if (seq !== qrSeq) return;
+    rpc('plugin.tool.call', { tool: 'qr_status', args: {} })
+      .then(function (res) {
+        if (seq !== qrSeq) return;
+        var d = failed(res) ? null : (res && res.data !== undefined ? res.data : res);
+        var st = (d && d.state) || '';
+        if (st === 'ok') {
+          stopQrPolling();
+          setQrState('登录成功，账号已更新', 'ok');
+          banner('扫码登录成功', 'ok');
+          hideLoginForm();
+          loadAccounts();
+          return;
+        }
+        if (st === 'error') {
+          stopQrPolling();
+          setQrState('扫码失败：' + ((d && (d.message || d.error)) || '未知错误'), 'err');
+          var b0 = el('btn-qr-start');
+          if (b0) b0.disabled = false;
+          return;
+        }
+        // scanned / waiting / idle 都继续等；把插件的提示原样显示（不编文案）
+        if (d && d.message) setQrState(d.message);
+        else if (st === 'waiting') setQrState('等待扫码…');
+        qrTimer = setTimeout(function () { pollQr(seq); }, 2000);
+      })
+      .catch(function (e) {
+        if (seq !== qrSeq) return;
+        setQrState('轮询失败：' + errText(e), 'err');
+        qrTimer = setTimeout(function () { pollQr(seq); }, 3000);
+      });
+  }
+
+  function cancelQrLogin() {
+    stopQrPolling();
+    rpc('plugin.tool.call', { tool: 'qr_cancel', args: {} }).catch(function () {});
+    var cancel = el('btn-qr-cancel');
+    if (cancel) cancel.hidden = true;
+    var btn = el('btn-qr-start');
+    if (btn) btn.disabled = false;
+    setQrState('已取消');
+    var box = el('qr-img');
+    if (box) {
+      box.className = 'qrbox__img muted small';
+      box.textContent = '点「生成二维码」后，用手机上的小米商城 / 米家 App 扫码确认登录';
+    }
+  }
+
+  /** 登录方式切换：账号密码 / 扫码登录（并排两个按钮，点击切页）。 */
+  function setLoginMode(mode) {
+    var seg = el('login-seg');
+    if (seg) {
+      for (var i = 0; i < seg.children.length; i++) {
+        var b = seg.children[i];
+        b.className = 'seg__btn' + (b.getAttribute('data-mode') === mode ? ' seg__btn--on' : '');
+      }
+    }
+    var pPass = el('login-pane-pass');
+    var pQr = el('login-pane-qr');
+    if (pPass) pPass.hidden = mode !== 'pass';
+    if (pQr) pQr.hidden = mode !== 'qr';
+    var loginBtn = el('btn-login');
+    if (loginBtn) loginBtn.hidden = mode === 'qr';
+    if (mode !== 'qr') {
+      cancelQrLogin();
+    } else {
+      // 切到扫码页时，若还没开始过就别显示"已取消"这种上一轮残留
+      var st = el('qr-state');
+      if (st && (st.textContent === '已取消' || st.textContent === '')) setQrState('未开始');
+    }
     scheduleHeight();
   }
 
@@ -1882,6 +2135,26 @@
       scheduleHeight();
       return;
     }
+    /*
+     * 统计条（2026-11-21 用户截图：「局域网检查增加这几部分」= 设备总数/在线/离线）。
+     *
+     * 口径按**筛后列表**算 —— 用户选了某个账号时，磁贴应当描述他正在看的那批设备，
+     * 否则"总数 11、列表 3 行"又会是一处自相矛盾。
+     */
+    var nTotal = list.length, nOn = 0, nOff = 0;
+    for (var ti = 0; ti < list.length; ti++) {
+      var st0 = (list[ti] || {}).status || '';
+      if (st0 === '在线') nOn += 1;
+      else if (st0 === '离线') nOff += 1;
+    }
+    var tiles2 = el('health-tiles');
+    if (tiles2) {
+      tiles2.innerHTML = '';
+      addStat(tiles2, nTotal, '设备总数', '');
+      addStat(tiles2, nOn, '在线', nOn > 0 ? 'ok' : '');
+      addStat(tiles2, nOff, '离线', nOff > 0 ? 'warn' : '');
+    }
+
     var html = '<table><thead><tr>' +
       '<th>设备名称</th><th>型号</th><th style="width:120px">版本</th>' +
       '<th style="width:100px">健康状态</th><th style="width:92px">耗时</th><th style="width:170px">通信路径</th>' +
@@ -1901,7 +2174,9 @@
         (d.path_detail ? '<span class="hsub">' + esc(d.path_detail) + '</span>' : '') + '</td>' +
         '<td><span class="hver">' + esc(d.model) + '</span></td>' +
         '<td><span class="hver">' + esc(d.version || '-') + '</span></td>' +
-        '<td><span class="hst hst--' + cls + '">' + esc(status) + '</span></td>' +
+        '<td><span class="hst hst--' + cls + '">' + esc(status) + '</span>' +
+        (status !== '在线' && d.offline_since
+          ? '<span class="hsub">' + esc(fmtSince(d.offline_since)) + '</span>' : '') + '</td>' +
         '<td><span class="hlat hlat--' + latCls + '">' + esc(lat) + '</span></td>' +
         '<td class="muted small">' + esc(pathText) + '</td>' +
         '</tr>';
@@ -1909,6 +2184,27 @@
     html += '</tbody></table>';
     box.innerHTML = html;
     scheduleHeight();
+  }
+
+  /**
+   * 「离线时间」的人话形式（2026-11-21 用户「离线显示离线时间」）。
+   *
+   * 规则：<1 分钟「刚刚」；<1 小时「N 分钟」；<24 小时「N 小时」；
+   * 再久就报绝对时间（"昨天 18:02" 这类猜法容易错，直接给日期更诚实）。
+   * 时间戳解析不了就原样返回 —— 不编一个"刚刚"来掩盖坏数据。
+   */
+  function fmtSince(iso) {
+    if (!iso) return '';
+    var t = Date.parse(iso);
+    if (isNaN(t)) return String(iso);
+    var diff = Date.now() - t;
+    if (diff < 0) diff = 0;
+    var min = Math.floor(diff / 60000);
+    if (min < 1) return '刚刚离线';
+    if (min < 60) return '已离线 ' + min + ' 分钟';
+    var hr = Math.floor(min / 60);
+    if (hr < 24) return '已离线 ' + hr + ' 小时';
+    return '离线自 ' + fmtDateTime(iso);
   }
 
   /*
@@ -2002,11 +2298,21 @@
       loadSyncResult();
     });
     el('btn-add').addEventListener('click', openLogin);
-    el('btn-cancel-login').addEventListener('click', function () {
-      el('login-form').hidden = true;
-      el('f-pass').value = '';
-      scheduleHeight();
-    });
+    el('btn-cancel-login').addEventListener('click', hideLoginForm);
+    // 登录方式并排切换
+    var seg = el('login-seg');
+    if (seg) {
+      seg.addEventListener('click', function (ev) {
+        var t = ev.target;
+        if (!t || !t.getAttribute) return;
+        var mode = t.getAttribute('data-mode');
+        if (mode) setLoginMode(mode);
+      });
+    }
+    var qrStart = el('btn-qr-start');
+    if (qrStart) qrStart.addEventListener('click', startQrLogin);
+    var qrCancel = el('btn-qr-cancel');
+    if (qrCancel) qrCancel.addEventListener('click', cancelQrLogin);
     el('btn-login').addEventListener('click', startLogin);
     el('btn-logout-session').addEventListener('click', logoutAccount);
     el('btn-verify').addEventListener('click', submitVerify);

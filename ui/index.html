@@ -48,20 +48,40 @@
     <div id="login-form" class="card" hidden>
       <div class="form">
         <div class="form__hd">登录小米账号</div>
-        <label class="fld">
-          <span>账号（手机号 / 邮箱 / 账号 ID）</span>
-          <input type="text" id="f-user" autocomplete="username" placeholder="手机号 或 账号 ID">
-        </label>
-        <label class="fld">
-          <span>密码</span>
-          <input type="password" id="f-pass" autocomplete="current-password" placeholder="小米账号密码">
-        </label>
-        <label class="fld">
-          <span>区域</span>
-          <select id="f-region">
-            <option value="cn">中国大陆</option>
-          </select>
-        </label>
+        <!-- 两种登录方式并排（2026-11-21 用户：「添加账号后弹出来并排放」） -->
+        <div class="seg" id="login-seg">
+          <button type="button" class="seg__btn seg__btn--on" data-mode="pass">账号密码</button>
+          <button type="button" class="seg__btn" data-mode="qr">扫码登录</button>
+        </div>
+
+        <div id="login-pane-pass">
+          <label class="fld">
+            <span>账号（手机号 / 邮箱 / 账号 ID）</span>
+            <input type="text" id="f-user" autocomplete="username" placeholder="手机号 或 账号 ID">
+          </label>
+          <label class="fld">
+            <span>密码</span>
+            <input type="password" id="f-pass" autocomplete="current-password" placeholder="小米账号密码">
+          </label>
+          <label class="fld">
+            <span>区域</span>
+            <select id="f-region">
+              <option value="cn">中国大陆</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="login-pane-qr" hidden>
+          <div class="qrbox">
+            <div id="qr-img" class="qrbox__img muted small">点「生成二维码」后，用手机上的小米商城 / 米家 App 扫码确认登录</div>
+            <div class="qrbox__side">
+              <button type="button" id="btn-qr-start" class="btn btn--primary btn--sm">生成二维码</button>
+              <button type="button" id="btn-qr-cancel" class="btn btn--sm" hidden>取消</button>
+              <p id="qr-state" class="muted small">未开始</p>
+            </div>
+          </div>
+        </div>
+
         <div class="form__act">
           <button type="button" id="btn-login" class="btn btn--primary">登录</button>
           <button type="button" id="btn-cancel-login" class="btn">取消</button>
@@ -209,6 +229,8 @@
           <label class="fld"><span>家庭</span>
             <select id="f-health-household"></select></label>
         </div>
+        <!-- 局域网检查统计条（2026-11-21 用户截图：设备总数 / 在线 / 离线） -->
+        <div id="health-tiles" class="stats stats--3"></div>
         <div id="health-table" class="tscroll"><p class="muted small">读取中…</p></div>
       </div>
     </div>

@@ -60,6 +60,13 @@ type healthEntry struct {
 	// Account 是同步来源账号（2026-11-20 用户要求：列表按账号过滤）。
 	// 旧登记没有该字段，为空 ⇒ 前端显示时不带账号副行、过滤按"未知"。
 	Account string `json:"account,omitempty"`
+	// OfflineSince 是这条设备**进入当前状态**的时刻（RFC3339，离线才有意义）。
+	//
+	// 2026-11-21 用户「离线显示离线时间」：健康表每次探测都会覆盖状态，但"离线多久"
+	// 是另一个事实 —— 它需要记住**状态变化的时刻**，而不是探测时刻。
+	// 实现：`lan-health-since.json` 记 {external_id: {status, since}}；
+	// 状态没变就沿用旧 since，变了就写 now。重启后照样连续（落盘）。
+	OfflineSince string `json:"offline_since,omitempty"`
 }
 
 // gwModelPrefixes 是"经网关通信、自身不联网"的型号前缀。
@@ -217,10 +224,20 @@ func healthListTool(ctx *plugin.Context) (json.RawMessage, error) {
 			out = append(out, e)
 		}
 	}
+	/*
+	 * 给"非在线"的条目盖上「这个状态从什么时候开始」（2026-11-21）。
+	 *
+	 * 只对**离线/云端可用**这类"不在线"状态打时间戳：在线设备显示"在线 2 分钟"
+	 * 没有意义，而离线设备"离线多久"恰恰是用户最想知道的（是他刚拔电源，还是
+	 * 已经断了半天）。
+	 */
+	now := time.Now().UTC()
+	applyOfflineSince(ctx, out, now)
+
 	return json.Marshal(map[string]any{
 		"devices":    out,
 		"count":      len(out),
-		"checked_at": time.Now().UTC().Format(time.RFC3339),
+		"checked_at": now.Format(time.RFC3339),
 	})
 }
 
@@ -334,4 +351,91 @@ func probeLanDeviceFast(ctx *plugin.Context, d miioDevice) lanHealthEntry {
 		return lanHealthEntry{CheckedAt: now, LatencyMS: latency, Err: perr.Error()}
 	}
 	return lanHealthEntry{Reachable: true, CheckedAt: now, LatencyMS: latency}
+}
+
+/*
+ * applyOfflineSince 维护「设备从什么时候开始处于当前状态」（2026-11-21）。
+ *
+ * # 为什么要落盘而不是只在内存里记
+ *
+ * 用户问的是"离线多久"，而插件会因热加载换代、服务重启而换进程 —— 只记内存
+ * 的话每次换代都把"已离线 3 小时"重置成"刚刚离线"，那是**编造**。
+ * 这个事实很便宜（一台设备一条记录），落一个小 JSON 就够，且天然跨重启连续。
+ *
+ * # 判据
+ *
+ *	在线（healthOnline）       → 不显示时间（"在线 2 分钟"没有意义），并清掉记录
+ *	其余（离线/云端可用…）      → 记/沿用 since
+ *
+ * 状态没变就**沿用**旧 since（不是每次探测都刷新），变了才写 now。
+ */
+const lanHealthSincePath = "lan-health-since.json"
+
+type healthSinceRec struct {
+	Status string `json:"status"`
+	Since  string `json:"since"`
+}
+
+func loadHealthSince(ctx *plugin.Context) map[string]healthSinceRec {
+	out := map[string]healthSinceRec{}
+	r, err := ctx.FSRead(lanHealthSincePath)
+	if err != nil || !r.Found {
+		return out
+	}
+	b, err := r.Data()
+	if err != nil {
+		return out
+	}
+	_ = json.Unmarshal(b, &out)
+	if out == nil {
+		out = map[string]healthSinceRec{}
+	}
+	return out
+}
+
+func saveHealthSince(ctx *plugin.Context, m map[string]healthSinceRec) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	_ = ctx.FSWrite(plugin.FSWriteRequest{
+		Path: lanHealthSincePath, DataB64: base64.StdEncoding.EncodeToString(b), QuotaKB: 64,
+	})
+}
+
+func applyOfflineSince(ctx *plugin.Context, out []healthEntry, now time.Time) {
+	if len(out) == 0 {
+		return
+	}
+	prev := loadHealthSince(ctx)
+	next := make(map[string]healthSinceRec, len(prev))
+	nowStr := now.Format(time.RFC3339)
+	changed := false
+
+	for i := range out {
+		e := &out[i]
+		key := e.Name
+		if key == "" {
+			continue
+		}
+		if e.Status == healthOnline {
+			// 在线：清掉历史（下次离线要重新计时）
+			if _, had := prev[key]; had {
+				changed = true
+			}
+			continue
+		}
+		rec, had := prev[key]
+		if had && rec.Status == e.Status && rec.Since != "" {
+			e.OfflineSince = rec.Since
+			next[key] = rec
+			continue
+		}
+		e.OfflineSince = nowStr
+		next[key] = healthSinceRec{Status: e.Status, Since: nowStr}
+		changed = true
+	}
+	if changed || len(next) != len(prev) {
+		saveHealthSince(ctx, next)
+	}
 }
