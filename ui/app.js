@@ -1772,8 +1772,16 @@
       return c.kind !== 'action' && c.capability === 'switch' && c.primary !== true;
     });
 
+    /*
+     * 页签必须在**内容之前**挂进 DOM（2026-11-21 用户截图指出：页签跑到开关行下面）。
+     *
+     * 上一版是按 defs 循环「建 tab 按钮 + 建 pane 并 append」，最后才 append tabs ——
+     * 于是 DOM 顺序是「pane…, tabs」，页签自然落在内容下方。现在：先把 tabs 挂上，
+     * 再按同样的 defs 建 pane，顺序就是「页签 → 内容」。
+     */
     var tabs = document.createElement('div');
     tabs.className = 'tabs';
+    box.appendChild(tabs);
     var panes = {};
     var defs = [
       { key: 'ctl', label: detail ? ('控制 (' + controls.length + ')') : '控制 (…)' },
@@ -1805,7 +1813,6 @@
         scheduleHeight();
       });
     });
-    box.appendChild(tabs);
 
     /*
      * 「页面简单点」（2026-11-21 用户）：控制页签**只列实际能力**。
@@ -1884,40 +1891,13 @@
         detailItem(auxCard, dtIconOf(c), c.name || key, fmtDetailValue(c, raw), raw === undefined || raw === null);
       });
     }
-    var kvCard = document.createElement('div');
-    kvCard.className = 'dcard';
-    var kvHd = document.createElement('div');
-    kvHd.className = 'dcard__hd';
-    var kvT = document.createElement('span');
-    kvT.className = 'dcard__title';
-    kvT.textContent = '设备信息';
-    kvHd.appendChild(kvT);
-    kvCard.appendChild(kvHd);
-    panes.cfg.appendChild(kvCard);
-    function addKv(k, v) {
-      var row = document.createElement('div');
-      row.className = 'ditem';
-      var ic = document.createElement('span');
-      ic.className = 'ditem__ico';
-      ic.innerHTML = dtIcon('info');
-      var nm = document.createElement('span');
-      nm.className = 'ditem__name';
-      nm.textContent = k;
-      var vl = document.createElement('span');
-      vl.className = 'ditem__val ditem__val--text';
-      vl.textContent = v;
-      row.appendChild(ic); row.appendChild(nm); row.appendChild(vl);
-      kvCard.appendChild(row);
-    }
-    addKv('设备ID', d.did || '—');
-    addKv('型号', d.model || '—');
-    addKv('实时在线', d.online === true ? '在线' : (d.online === false ? '离线' : '未知'));
-    addKv('通信路径', h ? ((h.path || '—') + (h.path_detail ? ' · ' + h.path_detail : '')) : '—');
-    if (detail && detail.values_source) {
-      addKv('实时值来源', detail.values_source === 'lan' ? '局域网直连'
-        : detail.values_source === 'cloud' ? '云端'
-        : '不可达' + (detail.values_error ? '：' + detail.values_error : ''));
-    }
+    /*
+     * 「设备信息」卡片已删除（2026-11-21 用户截图：红框这块多余）。
+     *
+     * 设备ID / 型号 / 通信路径 / 实时值来源属于排障信息，不在"配置"页签的
+     * 职责里；名字与在线状态左侧列表已有，页签只放**这个设备能配/能控/能读**的能力。
+     * 需要这些元数据时看左侧列表或平台设备页即可。
+     */
 
     // 默认选中第一个页签
     tabs.children[0].className = 'tab tab--on';
