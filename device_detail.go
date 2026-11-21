@@ -48,6 +48,58 @@ type deviceDetailProp struct {
 	Service string         `json:"service,omitempty"`
 }
 
+/*
+ * specUnitSymbol 把 MIoT 规格里的**英文单位枚举**翻成界面符号。
+ *
+ * 2026-11-21 用户截图：「41 celsius」—— 单位不对吧。
+ * 规格里 `unit` 是 `celsius` / `percentage` / `arcdegrees` 这类英文标识，
+ * 直接显示就成了 "celsius"；用户要看到的是 °C / % / °。
+ * 认不出的原样返回（不猜、不硬编一个可能错的中文单位）。
+ */
+func specUnitSymbol(u string) string {
+	switch strings.ToLower(strings.TrimSpace(u)) {
+	case "celsius":
+		return "°C"
+	case "fahrenheit":
+		return "°F"
+	case "kelvin":
+		return "K"
+	case "percentage":
+		return "%"
+	case "arcdegrees":
+		return "°"
+	case "lux":
+		return "lx"
+	case "decibels":
+		return "dB"
+	case "seconds":
+		return "s"
+	case "minutes":
+		return "min"
+	case "hours":
+		return "h"
+	case "days":
+		return "天"
+	case "watt", "watts":
+		return "W"
+	case "kilowatt", "kilowatts":
+		return "kW"
+	case "volt", "volts":
+		return "V"
+	case "ampere", "amperes":
+		return "A"
+	case "ppm":
+		return "ppm"
+	case "mg-per-cubic-meter":
+		return "mg/m³"
+	case "micrograms-per-cubic-meter":
+		return "µg/m³"
+	case "none", "":
+		return ""
+	}
+	return u
+}
+
 func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
 	var in struct {
 		DID  string `json:"did"`
@@ -114,7 +166,7 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 			item := deviceDetailProp{
 				SIID: svc.IID, PIID: pr.IID,
 				Name:   firstNonEmptyStr(pr.Name, humanizeURN(pr.Type)),
-				Format: pr.Format, Unit: pr.Unit, Access: pr.Access,
+				Format: pr.Format, Unit: specUnitSymbol(pr.Unit), Access: pr.Access,
 				Service: svcName,
 			}
 			if len(pr.ValueRange) >= 2 {
@@ -187,7 +239,7 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 				"capability":  cap,
 				"instance_id": fmt.Sprintf("%d.%d", svc.IID, pr.IID),
 				"name":        name, "group": svcName, "kind": "prop",
-				"siid": svc.IID, "piid": pr.IID, "format": pr.Format, "unit": pr.Unit,
+				"siid": svc.IID, "piid": pr.IID, "format": pr.Format, "unit": specUnitSymbol(pr.Unit),
 				"primary": primary,
 			})
 		}

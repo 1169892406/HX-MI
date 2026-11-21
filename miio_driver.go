@@ -1442,6 +1442,40 @@ func specNameMatches(instName, specName string) bool {
 	return a == b || strings.HasSuffix(a, "-"+b)
 }
 
+/*
+ * specQualifiedMatches 判断实例名是否是「这个服务的这个属性」。
+ *
+ * ★ 2026-11-21 用户：「指示灯开关和控制开关效果一样的啊，这个能力映射有问题吧」。
+ *
+ * 真身：实例名形如 `服务名_属性名`（`indicator-light_on`），而匹配用的是
+ * `specNameMatches`（相等 或 后缀 `-属性名`）。台灯有两个 `on`：service 2 主开关、
+ * service 3 指示灯 —— 实例 `indicator-light-on` 对两个都能"后缀命中"，
+ * 循环又按服务顺序取**第一个**，于是指示灯那颗开关写的是主开关的 siid/piid，
+ * 表现就是"点哪个都关主灯"。
+ *
+ * 这里要求**服务名与属性名同时对上**：把实例名按 `_` 拆成「前缀 + 属性名」，
+ * 前缀必须等于该服务名（忽略大小写与 `-`/`_` 差异）。这样 service 2 的 `on`
+ * 不会命中 `indicator-light_on`。
+ */
+func specQualifiedMatches(instName, svcType, propName string) bool {
+	norm := func(x string) string {
+		return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(x)), "_", "-")
+	}
+	a := norm(instName)
+	svc := norm(actionNameOf(svcType))
+	prop := norm(propName)
+	if a == "" || prop == "" {
+		return false
+	}
+	// 服务名未知（规格里没有可读 type）时退化成纯属性名匹配。
+	if svc == "" {
+		return a == prop
+	}
+	return a == svc+"-"+prop
+}
+
+// specNameMatches 是**宽松**匹配（相等或后缀）。只用于"规格里就该唯一"的
+// 动作/数值场景；多实例 bool（两个 on）必须用 specQualifiedMatches，否则会串。
 func execSpecDriven(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
 	inst := commandInstanceID(cmd)
 	sessionID, ssecurity, deviceID, err := openCloudSession(ctx)
@@ -1522,33 +1556,58 @@ func execSpecDriven(ctx *plugin.Context, d miioDevice, cmd miioCommand) error {
 		}
 		return fmt.Errorf("规格里找不到可选属性 %q", inst)
 	case "switch":
-		// 非主开关的 switch 实例（如麦克风静音 / 睡眠模式）：写该 bool 属性。
+		// 非主开关的 switch 实例（如指示灯 / 麦克风静音 / 睡眠模式）：写该 bool 属性。
 		want := inst
 		if want == "" {
 			return fmt.Errorf("缺少属性名（instance_id）")
 		}
 		on := strings.EqualFold(cmd.Action, "turn_on")
+
+		// ① 精确匹配「服务名_属性名」（唯一正确解，见 specQualifiedMatches）。
 		for _, svc := range sp.Services {
 			for _, pr := range svc.Properties {
-				if !specNameMatches(want, actionNameOf(pr.Type)) || pr.Format != "bool" {
+				if pr.Format != "bool" || !specQualifiedMatches(want, svc.Type, actionNameOf(pr.Type)) {
 					continue
 				}
-				rows, perr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/set",
-					[]map[string]any{{"did": d.ExternalID, "siid": svc.IID, "piid": pr.IID, "value": on}})
-				if perr != nil {
-					return perr
-				}
-				for _, r := range rows {
-					if code, ok := r["code"].(float64); ok && int(code) != 0 {
-						return fmt.Errorf("设备拒绝写入 %s（code=%d）", want, int(code))
-					}
-				}
-				return nil
+				return writeBoolProp(ctx, d, sessionID, ssecurity, deviceID, svc.IID, pr.IID, on, want)
 			}
+		}
+		// ② 退化：宽松匹配，但**必须唯一**。多候选一律拒绝 —— 猜一个写下去，
+		//    正是"两个开关控制同一盏灯"的来源，比报错更糟。
+		var hits []struct{ iid, piid int }
+		for _, svc := range sp.Services {
+			for _, pr := range svc.Properties {
+				if pr.Format != "bool" || !specNameMatches(want, actionNameOf(pr.Type)) {
+					continue
+				}
+				hits = append(hits, struct{ iid, piid int }{svc.IID, pr.IID})
+			}
+		}
+		if len(hits) == 1 {
+			return writeBoolProp(ctx, d, sessionID, ssecurity, deviceID, hits[0].iid, hits[0].piid, on, want)
+		}
+		if len(hits) > 1 {
+			return fmt.Errorf("实例 %q 对应 %d 个可写属性，无法确定写哪一个（请用「服务名_属性名」形式的 instance_id）", want, len(hits))
 		}
 		return fmt.Errorf("规格里找不到 bool 属性 %q", inst)
 	}
 	return fmt.Errorf("不支持的规格驱动能力 %q", cmd.Capability)
+}
+
+// writeBoolProp 往一个 bool 属性写值（云端 prop/set），并把 code≠0 当失败。
+func writeBoolProp(ctx *plugin.Context, d miioDevice, sessionID, ssecurity, deviceID string,
+	siid, piid int, on bool, label string) error {
+	rows, perr := cloudRequestMIoTSpec(ctx, sessionID, ssecurity, deviceID, "prop/set",
+		[]map[string]any{{"did": d.ExternalID, "siid": siid, "piid": piid, "value": on}})
+	if perr != nil {
+		return perr
+	}
+	for _, r := range rows {
+		if code, ok := r["code"].(float64); ok && int(code) != 0 {
+			return fmt.Errorf("设备拒绝写入 %s（siid=%d piid=%d code=%d）", label, siid, piid, int(code))
+		}
+	}
+	return nil
 }
 
 /*
