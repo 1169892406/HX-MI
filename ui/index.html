@@ -231,7 +231,15 @@
         </div>
         <!-- 局域网检查统计条（2026-11-21 用户截图：设备总数 / 在线 / 离线） -->
         <div id="health-tiles" class="stats stats--3"></div>
-        <div id="health-table" class="tscroll"><p class="muted small">读取中…</p></div>
+        <!--
+          左列表 + 右详情（2026-11-21 用户：「这部分页面在局域网检查结果列表页面右侧
+          应该也需要的」）：同步结果是云端在线控制，局域网检查是**离线局域网触发**，
+          两条通道各自要能点开同一台设备看能力。
+        -->
+        <div class="devgrid" id="health-grid">
+          <div id="health-table" class="devlist"><p class="muted small">读取中…</p></div>
+          <div id="health-detail" class="devdetail"><p class="muted small">左侧选择设备查看详情。</p></div>
+        </div>
       </div>
     </div>
   </section>

@@ -539,3 +539,14 @@ html[data-theme='dark'] .hst--gw { color: #b29aff; }
 /* 登录表单不必占满整个卡片宽度（2026-11-21 用户：「用不了那么宽」）。
    账号 / 密码 / 区域三行 + 并排两个登录方式，520px 足够。 */
 #login-form .form { max-width: 520px; }
+
+/* 局域网检查：左表右详情（2026-11-21 用户：局域网检查页右侧也要设备详情）。
+   表格行可点，选中行左侧一条强调色，和左侧设备列表的选中态保持同一种语言。 */
+#health-grid { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; }
+#health-grid .devlist { max-height: 460px; overflow: auto; }
+tr.hrow:hover { background: var(--card2); }
+tr.hrow--sel { background: var(--accent-weak); }
+tr.hrow--sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+@media (max-width: 900px) {
+  #health-grid { grid-template-columns: 1fr; }
+}

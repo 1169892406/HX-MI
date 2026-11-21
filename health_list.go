@@ -60,6 +60,9 @@ type healthEntry struct {
 	// Account 是同步来源账号（2026-11-20 用户要求：列表按账号过滤）。
 	// 旧登记没有该字段，为空 ⇒ 前端显示时不带账号副行、过滤按"未知"。
 	Account string `json:"account,omitempty"`
+	// DID 是设备在小米侧的 external_id（2026-11-21：局域网检查页也要能打开设备详情，
+	// 详情查询按 did 走；健康表原来只有 name/model，前端没法定位设备）。
+	DID string `json:"did,omitempty"`
 	// OfflineSince 是这条设备**进入当前状态**的时刻（RFC3339，离线才有意义）。
 	//
 	// 2026-11-21 用户「离线显示离线时间」：健康表每次探测都会覆盖状态，但"离线多久"
@@ -162,6 +165,7 @@ func healthListTool(ctx *plugin.Context) (json.RawMessage, error) {
 		_ = i
 		e := healthEntry{
 			Name: d.Name, Model: d.Model, Version: "",
+			DID:       d.ExternalID,
 			Account:   d.Account,
 			LatencyMS: -1, Latency: "不适用",
 		}

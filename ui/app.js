@@ -66,6 +66,68 @@
   /* 设备详情缓存：did -> device_detail 应答（或 {error}）；pending 防重复请求 */
   var devDetailCache = {};
   var devDetailPending = {};
+  /* 当前正在渲染的详情目标（决定 device_switch/device_control 发哪台设备、刷哪个容器） */
+  var detailTarget = { boxId: 'dev-detail', did: '', name: '' };
+  /* 局域网检查页当前选中的设备（did） */
+  var healthSelDid = '';
+  /* 预热状态：每台只尝试一次，整页只跑一轮（2026-11-21，防止重渲染导致递归请求） */
+  var prefetchTried = {};
+  /* 过期缓存的"最近一次后台刷新"时间戳（按 did）：防止失败后无限重试（见 loadDeviceDetail） */
+  var staleRefreshAt = {};
+  var prefetchDone = false;
+  /*
+   * 详情缓存落 localStorage（2026-11-21 用户：「每次点进来会等待一会，设备在线应该立刻出来」）。
+   *
+   * 之前只在内存里缓存：插件 iframe 每次打开、每次刷新都是新的 JS 上下文，
+   * 于是每次点进设备都要重新调一次 device_detail（规格 + 局域网/云端实时值，
+   * 云端那条可能要几秒）。把结果按 did 存到 localStorage 后：
+   *   · 再进来先**立刻画缓存**（不空白、不转圈）；
+   *   · 缓存超过 DETAIL_CACHE_TTL_MS 才在后台静默刷新，刷新回来再替换。
+   * 只存"界面要显示的东西"，不含凭据；容量很小（每台几百字节）。
+   */
+  var DETAIL_CACHE_KEY = 'hxmi.devDetail.v1';
+  var DETAIL_CACHE_TTL_MS = 5 * 60 * 1000;
+
+  function readDetailCacheStore() {
+    try {
+      var raw = localStorage.getItem(DETAIL_CACHE_KEY);
+      var obj = raw ? JSON.parse(raw) : {};
+      return obj && typeof obj === 'object' ? obj : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function writeDetailCacheStore(store) {
+    try {
+      localStorage.setItem(DETAIL_CACHE_KEY, JSON.stringify(store));
+    } catch (e) {
+      // 配额满/隐私模式：缓存是加速手段，写不进去不该打断任何功能
+    }
+  }
+
+  function putDetailCache(key, data) {
+    if (!key) return;
+    devDetailCache[key] = data;
+    var store = readDetailCacheStore();
+    store[key] = { at: Date.now(), data: data };
+    writeDetailCacheStore(store);
+  }
+
+  function hydrateDetailCache() {
+    var store = readDetailCacheStore();
+    Object.keys(store).forEach(function (k) {
+      var hit = store[k];
+      if (!hit || !hit.data) return;
+      devDetailCache[k] = hit.data;
+    });
+  }
+
+  function detailCacheAge(key) {
+    var store = readDetailCacheStore();
+    var hit = store[key];
+    return hit && hit.at ? Date.now() - hit.at : Infinity;
+  }
   /* 同步表当前展开编辑条的账号 id */
   var openEditId = '';
 
@@ -196,6 +258,9 @@
     startHeightReporting();
     // 这里**不**直接 boot：此刻宿主可能还没 attach 完（host-ready 未到）。
   }
+
+  // 启动即恢复上次的详情缓存：再点进同一台设备不用重新读（见 loadDeviceDetail）
+  hydrateDetailCache();
 
   window.addEventListener('message', onWindowMessage);
 
@@ -1392,6 +1457,30 @@
         : '暂无同步设备。手动同步一次后这里会列出云端返回的设备。';
       listBox.appendChild(p);
     } else {
+      /*
+       * 预热（2026-11-21「每次点进来要等」）：列表一渲染完就按顺序把**还没缓存**的
+       * 设备详情取一遍。用户点哪台，大概率已经取好了。
+       * 限 4 台且串行：wasm 单线程，并发请求只会互相排队，还会把宿主塞满。
+       */
+      (function prefetchDetails() {
+        if (prefetchDone) return;   // 一个页面只预热一轮，避免每次重渲染都重入
+        var queue = list.filter(function (x) {
+          return x && x.did && !devDetailCache[x.did] && !prefetchTried[x.did];
+        }).slice(0, 4);
+        if (!queue.length) return;
+        prefetchDone = queue.length > 0;
+        var i = 0;
+        (function step() {
+          if (i >= queue.length) return;
+          var d0 = queue[i++];
+          if (!devDetailCache[d0.did] && !devDetailPending[d0.did]) {
+            prefetchTried[d0.did] = true;
+            loadDeviceDetail(d0, { force: true, background: true });
+          }
+          setTimeout(step, 900);   // 固定节拍：wasm 单线程，串行比并发快
+        })();
+      })();
+
       var selOk = false;
       list.forEach(function (d) { if (d.did === devSelDid) selOk = true; });
       if (!selOk) devSelDid = list[0].did || '';
@@ -1492,21 +1581,55 @@
   }
 
   /** 详情数据懒加载：缓存命中不重发；应答回来仍选中同一台才重渲染。 */
-  function loadDeviceDetail(d) {
+  /**
+   * 取详情：有缓存就**立刻用缓存**，过期再后台静默刷新（2026-11-21「点进来要等」）。
+   *
+   * 三种情形：
+   *   ① 有缓存且未过期 → 直接用，**不发请求**（点一下就出来）；
+   *   ② 有缓存但过期   → 先用缓存渲染，后台刷新，回来后替换；
+   *   ③ 完全没有缓存   → 请求一次（首次必然要等这一下，之后都秒开）。
+   */
+  function loadDeviceDetail(d, opts) {
     var key = d.did || d.name || '';
-    if (!key || devDetailCache[key] || devDetailPending[key]) return;
+    if (!key) return;
+    var force = !!(opts && opts.force);
+    var cached = devDetailCache[key];
+    var age = detailCacheAge(key);
+    if (cached && !force) {
+      /*
+       * 有缓存就直接用（哪怕过期）：过期在后台刷一次，用户不用等。
+       *
+       * ⚠ 刷新必须**限频 + 不回调自身**（2026-11-21 实测把自己递归炸了）：
+       * 旧写法只判"过期就再 load 一次"，而刷新失败不会更新缓存时间 ⇒
+       * 失败 → renderDetail → 又看到过期 → 再刷新 …… 无限递归，把 JS 堆吃穿
+       * （打开页面几秒后 OOM）。现在按 key 记一个"刚刚试过刷新"的时间戳，
+       * 60 秒内不再重试。
+       */
+      var lastTry = staleRefreshAt[key] || 0;
+      if (age >= DETAIL_CACHE_TTL_MS && Date.now() - lastTry > 60 * 1000 && !devDetailPending[key]) {
+        staleRefreshAt[key] = Date.now();
+        loadDeviceDetail(d, { force: true, background: true });
+      }
+      return;
+    }
+    if (devDetailPending[key]) return;
     devDetailPending[key] = true;
     rpc('plugin.tool.call', { tool: 'device_detail', args: { did: d.did, name: d.name } })
       .then(function (res) {
         delete devDetailPending[key];
-        devDetailCache[key] = failed(res) ? { error: failText(res) } : res;
-        if (devSelDid === (d.did || '')) renderDetail();
+        if (failed(res)) {
+          // 失败不要覆盖已有缓存：缓存里的旧值比一个错误块有用得多
+          if (!cached) devDetailCache[key] = { error: failText(res) };
+        } else {
+          putDetailCache(key, res);
+        }
+        repaintDetailIfCurrent(d);
         scheduleHeight();
       })
       .catch(function (e) {
         delete devDetailPending[key];
-        devDetailCache[key] = { error: errText(e) };
-        if (devSelDid === (d.did || '')) renderDetail();
+        if (!cached) devDetailCache[key] = { error: errText(e) };
+        repaintDetailIfCurrent(d);
         scheduleHeight();
       });
   }
@@ -1616,7 +1739,7 @@
       sw.classList.add('is-busy');
       rpc('plugin.tool.call', {
         tool: 'device_switch',
-        args: { did: devSelDid, siid: c.siid, piid: c.piid, value: next, primary: !!primary }
+        args: { did: detailTarget.did, siid: c.siid, piid: c.piid, value: next, primary: !!primary }
       }).then(function (res) {
         var data = failed(res) ? null : (res && res.data !== undefined ? res.data : res);
         if (!data || data.ok === false) {
@@ -1683,7 +1806,7 @@
       btn.textContent = '下发中…';
       rpc('plugin.tool.call', {
         tool: 'device_control',
-        args: { did: devSelDid, kind: 'press', siid: c.siid, aiid: c.aiid, label: c.name || '' }
+        args: { did: detailTarget.did, kind: 'press', siid: c.siid, aiid: c.aiid, label: c.name || '' }
       }).then(function (res) {
         var data = failed(res) ? null : (res && res.data !== undefined ? res.data : res);
         if (!data || data.ok === false) {
@@ -1759,7 +1882,7 @@
       var v = Number(slider.value);
       rpc('plugin.tool.call', {
         tool: 'device_control',
-        args: { did: devSelDid, kind: 'set_value', siid: c.siid, piid: c.piid, value: v, label: c.name || '' }
+        args: { did: detailTarget.did, kind: 'set_value', siid: c.siid, piid: c.piid, value: v, label: c.name || '' }
       }).then(function (res) {
         var data = failed(res) ? null : (res && res.data !== undefined ? res.data : res);
         if (!data || data.ok === false) {
@@ -1859,13 +1982,49 @@
     pane.appendChild(grid);
   }
 
+  /**
+   * 详情数据回来后，只重画**当前正在看的那一个**容器。
+   *
+   * 两个详情容器（同步结果 dev-detail / 局域网检查 health-detail）共用缓存与请求，
+   * 但同一时刻只有一个是"当前上下文"。用 detailTarget 判定，避免一处刷新把另一处
+   * 正在看的内容也重画（会闪、也会把用户刚切到的页签重置回第一个）。
+   */
+  function repaintDetailIfCurrent(d) {
+    var did = (d && d.did) || '';
+    if (!detailTarget || !detailTarget.did || detailTarget.did !== did) return;
+    var boxId = detailTarget.boxId;
+    var sync = (syncView && syncView.sync) || {};
+    var list = sync.device_list || [];
+    var dev = null;
+    list.forEach(function (x) { if (x.did === did) dev = x; });
+    if (!dev) {
+      // 健康表里可能有、同步列表里没有（离线设备也可能不在最近一次同步结果里）
+      dev = { did: did, name: (d && d.name) || '', online: d && d.online };
+    }
+    renderDetailInto(boxId, dev);
+  }
+
+  /**
+   * 把「控制 / 配置 / 传感器」三页签画到指定容器（2026-11-21）。
+   *
+   * 两个入口共用同一份渲染：
+   *   · 同步结果页 → `dev-detail`（云端在线控制）
+   *   · 局域网检查页 → `health-detail`（离线局域网触发）
+   * 用户原话：「这部分页面，在局域网检查结果列表页面右侧应该也需要的，
+   * 同步结果是在线云控，局域网检查中的是离线局域网控制触发」。
+   */
   function renderDetail() {
-    var box = el('dev-detail');
-    box.innerHTML = '';
     var sync = (syncView && syncView.sync) || {};
     var list = sync.device_list || [];
     var d = null;
     list.forEach(function (x) { if (x.did === devSelDid) d = x; });
+    renderDetailInto('dev-detail', d);
+  }
+
+  function renderDetailInto(boxId, d) {
+    var box = el(boxId);
+    if (!box) return;
+    box.innerHTML = '';
     if (!d) {
       var p0 = document.createElement('p');
       p0.className = 'muted small';
@@ -1874,6 +2033,7 @@
       scheduleHeight();
       return;
     }
+    detailTarget = { boxId: boxId, did: d.did || '', name: d.name || '' };
 
     /*
      * 顶部标题块已删（2026-11-21 用户：「这部分删除吧，控制 配置 传感器放在这里」）。
@@ -1957,7 +2117,7 @@
     if (!detail) {
       var pWait = document.createElement('p');
       pWait.className = 'muted small';
-      pWait.textContent = '读取规格与实时值…';
+      pWait.textContent = '首次读取规格与实时值…（之后点开即显示）';
       panes.ctl.appendChild(pWait);
     } else if (detail.error) {
       var pErr = document.createElement('p');
@@ -1995,7 +2155,7 @@
     if (!detail) {
       var sWait = document.createElement('p');
       sWait.className = 'muted small';
-      sWait.textContent = '读取规格与实时值…';
+      sWait.textContent = '首次读取规格与实时值…（之后点开即显示）';
       panes.sns.appendChild(sWait);
     } else if (detail.error) {
       var sErr = document.createElement('p');
@@ -2287,7 +2447,9 @@
       var lat = d.latency || '不适用';
       var latCls = lat === '不适用' ? 'na' : (status === '在线' ? 'ok' : 'bad');
       var pathText = (d.path || '—') + (d.path_detail ? ' · ' + d.path_detail : '');
-      html += '<tr>' +
+      var rowDid = d.did || '';
+      var rowSel = rowDid && rowDid === healthSelDid ? ' class="hrow hrow--sel"' : ' class="hrow"';
+      html += '<tr' + rowSel + ' data-did="' + esc(rowDid) + '">' +
         '<td><span class="hname">' + esc(d.name) + '</span>' +
         (d.account ? '<span class="hsub">' + esc(d.account) + '</span>' : '') +
         (d.path_detail ? '<span class="hsub">' + esc(d.path_detail) + '</span>' : '') + '</td>' +
@@ -2302,6 +2464,40 @@
     }
     html += '</tbody></table>';
     box.innerHTML = html;
+
+    /*
+     * 点行 → 右侧打开该设备的「控制 / 配置 / 传感器」（2026-11-21）。
+     *
+     * 局域网检查是**离线局域网触发**那条通道，和同步结果（云端在线控制）是两件事，
+     * 所以它需要自己的详情面板，而不是把用户弹回同步结果页。
+     */
+    var rows = box.querySelectorAll('tr.hrow');
+    for (var ri = 0; ri < rows.length; ri++) {
+      (function (tr) {
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', function () {
+          var did = tr.getAttribute('data-did') || '';
+          if (!did) {
+            banner('这台设备没有上报设备ID，无法打开详情（先在同步里跑一次）', 'err');
+            return;
+          }
+          healthSelDid = did;
+          var sel = [];
+          for (var k = 0; k < list.length; k++) {
+            if ((list[k] || {}).did === did) sel.push(list[k]);
+          }
+          var dev = sel[0] || { did: did, name: tr.querySelector('.hname') ? tr.querySelector('.hname').textContent : '' };
+          var on = (dev.status || '') === '在线' || dev.online === true;
+          var devName = dev.name || (tr.querySelector('.hname') ? tr.querySelector('.hname').textContent : '');
+          renderDetailInto('health-detail', { did: did, name: devName, online: on });
+          // 高亮：只改 class，不重画整表（重画会丢滚动位置）
+          for (var r2 = 0; r2 < rows.length; r2++) {
+            rows[r2].className = rows[r2] === tr ? 'hrow hrow--sel' : 'hrow';
+          }
+          scheduleHeight();
+        });
+      })(rows[ri]);
+    }
     scheduleHeight();
   }
 
