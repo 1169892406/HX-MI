@@ -492,6 +492,8 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 		return deviceDetailTool(ctx, args)
 	case "device_switch":
 		return deviceSwitchTool(ctx, args)
+	case "device_control":
+		return deviceControlTool(ctx, args)
 	case "cred_check":
 		return credCheckTool(ctx)
 	case "ir_probe":

@@ -454,6 +454,18 @@ body {
 .small.err { color: var(--err); }
 .small.ok { color: var(--ok); }
 
+/* 动作按钮 / 数值滑杆（2026-11-21：插件页所有能力都要能用） */
+.dbtn {
+  flex: 0 0 auto; min-width: 62px; height: 30px; padding: 0 12px;
+  border-radius: 8px; border: 1px solid var(--accent);
+  background: var(--accent-weak, rgba(76,141,255,.14)); color: var(--accent);
+  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.dbtn:hover { background: var(--accent-weak2, rgba(76,141,255,.22)); }
+.dbtn:disabled { opacity: .55; cursor: progress; }
+.dslider { flex: 0 1 140px; min-width: 80px; accent-color: var(--accent); }
+.dslider__val { flex: 0 0 auto; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px; }
+
 /* 可点击开关（2026-11-21：「控制和配置要真实可以点击的」）。
    视觉与平台设备详情的开关一致：48×27 胶囊 + 白色旋钮；下发中半透明并禁用。 */
 .dsw {

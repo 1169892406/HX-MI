@@ -211,3 +211,133 @@ func briefErr(e error) string {
 	}
 	return msg
 }
+
+/*
+ * device_control：规格驱动的**动作 / 数值**下发（2026-11-21 用户：
+ * 「所有设备在插件侧都应该可以用，后期映射能力到平台啊，插件侧都不行怎么映射到平台呢」）。
+ *
+ * 与 device_switch 的分工：
+ *   · device_switch 只管 bool 属性（开关类），语义最窄、最不容易误写；
+ *   · device_control 管其余两类规格驱动能力：
+ *       press      → 调规格里的动作（siid + aiid，`in` 为空）
+ *       set_value  → 写数值属性（siid + piid + value）
+ *
+ * 通道顺序同样是 局域网优先 → 云端回落（动作两类都支持）。
+ * 这里不解码动作返回值：action 的 out 参数各型号差异极大，编一套通用解码必然是错的；
+ * 界面上「已下发」代表设备接受了这次调用，不是"已达成你期望的物理效果"。
+ */
+func deviceControlTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
+	var in struct {
+		DID   string `json:"did"`
+		Name  string `json:"name"`
+		Kind  string `json:"kind"` // press | set_value
+		SIID  int    `json:"siid"`
+		PIID  int    `json:"piid"`
+		AIID  int    `json:"aiid"`
+		Value any    `json:"value"`
+		Label string `json:"label"`
+	}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &in)
+	}
+	if in.SIID <= 0 {
+		return nil, errors.New("需要 siid（来自 device_detail 的控件定义）")
+	}
+	kind := strings.ToLower(strings.TrimSpace(in.Kind))
+	if kind == "" {
+		kind = "press"
+	}
+	if kind == "press" && in.AIID <= 0 {
+		return nil, errors.New("press 需要 aiid（动作 id）")
+	}
+	if kind == "set_value" && in.PIID <= 0 {
+		return nil, errors.New("set_value 需要 piid（属性 id）")
+	}
+
+	ds, err := loadDeviceRegistry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var dev *miioDevice
+	for i := range ds {
+		if in.DID != "" && ds[i].ExternalID == in.DID {
+			dev = &ds[i]
+			break
+		}
+		if in.DID == "" && in.Name != "" && ds[i].Name == in.Name {
+			dev = &ds[i]
+			break
+		}
+	}
+	if dev == nil {
+		return nil, errors.New("设备不在本机登记里（先同步一次）")
+	}
+	d := *dev
+	started := time.Now()
+	out := map[string]any{"ok": false, "did": d.ExternalID, "kind": kind}
+
+	var lanErr, cloudErr error
+	source := ""
+
+	// ① 局域网
+	if !strings.HasPrefix(strings.ToLower(d.Model), "lumi.") && strings.TrimSpace(d.Host) != "" {
+		if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil && len(tok) == 16 {
+			if kind == "press" {
+				rows, rerr := miioBatchProperties(ctx, d, tok, "action",
+					[]map[string]any{{"did": d.ExternalID, "siid": in.SIID, "aiid": in.AIID, "in": []any{}}})
+				if rerr == nil && firstErrorCode(rows) == 0 {
+					source = "lan"
+				} else if rerr != nil {
+					lanErr = rerr
+				}
+			} else {
+				rows, rerr := miioBatchProperties(ctx, d, tok, "set_properties",
+					[]map[string]any{{"did": d.ExternalID, "siid": in.SIID, "piid": in.PIID, "value": in.Value}})
+				if rerr == nil && firstErrorCode(rows) == 0 {
+					source = "lan"
+				} else if rerr != nil {
+					lanErr = rerr
+				}
+			}
+		} else {
+			lanErr = errors.New("设备 token 不可用")
+		}
+	} else {
+		lanErr = errors.New("无局域网地址（走云端）")
+	}
+
+	// ② 云端回落
+	if source == "" {
+		if sessionID, ssec, devID, oerr := openCloudSession(ctx); oerr == nil {
+			var rows []map[string]any
+			var rerr error
+			if kind == "press" {
+				rows, rerr = cloudRequestMIoTSpec(ctx, sessionID, ssec, devID, "action",
+					map[string]any{"did": d.ExternalID, "siid": in.SIID, "aiid": in.AIID, "in": []any{}})
+			} else {
+				rows, rerr = cloudRequestMIoTSpec(ctx, sessionID, ssec, devID, "prop/set",
+					[]map[string]any{{"did": d.ExternalID, "siid": in.SIID, "piid": in.PIID, "value": in.Value}})
+			}
+			_ = ctx.HTTPClose(sessionID)
+			if rerr == nil && firstErrorCode(rows) == 0 {
+				source = "cloud"
+			} else if rerr != nil {
+				cloudErr = rerr
+			}
+		} else {
+			cloudErr = oerr
+		}
+	}
+
+	if source == "" {
+		out["error"] = fmt.Sprintf("下发失败：局域网 %v；云端 %v", briefErr(lanErr), briefErr(cloudErr))
+		return json.Marshal(out)
+	}
+	out["ok"] = true
+	out["via"] = source
+	out["latency_ms"] = time.Since(started).Milliseconds()
+	if kind == "set_value" {
+		out["value"] = in.Value
+	}
+	return json.Marshal(out)
+}

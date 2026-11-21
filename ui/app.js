@@ -1651,6 +1651,141 @@
     return row;
   }
 
+  /**
+   * 动作按钮行（2026-11-21 用户：「所有设备在插件侧都应该可以用」）。
+   *
+   * 规格里的动作（播放 / 暂停 / 唤醒 / 停止闹钟…）之前只画一行「按钮 · 平台设备页下发」，
+   * 点不动。现在右侧是可点的「执行」：点一下走 device_control(kind=press, siid, aiid)，
+   * 局域网优先、云端回落，结果用横幅如实回报。
+   */
+  function actionRow(card, c) {
+    var row = document.createElement('div');
+    row.className = 'ditem';
+
+    var ic = document.createElement('span');
+    ic.className = 'ditem__ico';
+    ic.innerHTML = dtIcon(dtIconOf(c));
+
+    var nm = document.createElement('div');
+    nm.className = 'ditem__name';
+    var nmMain = document.createElement('span');
+    nmMain.textContent = c.name || c.instance_id || '';
+    nm.appendChild(nmMain);
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'dbtn';
+    btn.textContent = '执行';
+    btn.title = '调用设备动作';
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '下发中…';
+      rpc('plugin.tool.call', {
+        tool: 'device_control',
+        args: { did: devSelDid, kind: 'press', siid: c.siid, aiid: c.aiid, label: c.name || '' }
+      }).then(function (res) {
+        var data = failed(res) ? null : (res && res.data !== undefined ? res.data : res);
+        if (!data || data.ok === false) {
+          banner('『' + (c.name || '') + '』下发失败：' + ((data && (data.error || data.message)) || failText(res)), 'err');
+          return;
+        }
+        var via = data.via === 'lan' ? '局域网' : '云端';
+        var ms = typeof data.latency_ms === 'number' ? ' ' + data.latency_ms + 'ms' : '';
+        banner('已下发：' + (c.name || '') + '（' + via + ms + '）', 'ok');
+      }).catch(function (e) {
+        banner('『' + (c.name || '') + '』下发失败：' + errText(e), 'err');
+      }).then(function () {
+        btn.disabled = false;
+        btn.textContent = '执行';
+        scheduleHeight();
+      });
+    });
+
+    row.appendChild(ic);
+    row.appendChild(nm);
+    row.appendChild(btn);
+    card.appendChild(row);
+    return row;
+  }
+
+  /**
+   * 数值行（音量 / 亮度这类）：滑杆 + 发送。
+   *
+   * 交互刻意保守：拖动只改本地显示，**点「发送」才真的写设备** —— 拖动即下发会
+   * 在拖动途中连发几十条命令（设备侧不一定扛得住，云端还有速率限制）。
+   */
+  function valueRow(card, c, values) {
+    var key = c.siid + '.' + c.piid;
+    var cur = typeof values[key] === 'number' ? values[key] : (c.min || 0);
+    var min = typeof c.min === 'number' ? c.min : 0;
+    var max = typeof c.max === 'number' ? c.max : 100;
+
+    var row = document.createElement('div');
+    row.className = 'ditem';
+
+    var ic = document.createElement('span');
+    ic.className = 'ditem__ico';
+    ic.innerHTML = dtIcon(dtIconOf(c));
+
+    var nm = document.createElement('div');
+    nm.className = 'ditem__name';
+    var nmMain = document.createElement('span');
+    nmMain.textContent = c.name || key;
+    nm.appendChild(nmMain);
+
+    var val = document.createElement('span');
+    val.className = 'dslider__val';
+    val.textContent = fmtDetailValue(c, cur);
+
+    var slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'dslider';
+    slider.min = String(min);
+    slider.max = String(max);
+    slider.step = c.step ? String(c.step) : '1';
+    slider.value = String(cur);
+    slider.addEventListener('input', function () {
+      val.textContent = fmtDetailValue(c, Number(slider.value));
+    });
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'dbtn';
+    btn.textContent = '发送';
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      var v = Number(slider.value);
+      rpc('plugin.tool.call', {
+        tool: 'device_control',
+        args: { did: devSelDid, kind: 'set_value', siid: c.siid, piid: c.piid, value: v, label: c.name || '' }
+      }).then(function (res) {
+        var data = failed(res) ? null : (res && res.data !== undefined ? res.data : res);
+        if (!data || data.ok === false) {
+          banner('『' + (c.name || '') + '』下发失败：' + ((data && (data.error || data.message)) || failText(res)), 'err');
+          return;
+        }
+        values[key] = v;
+        var via = data.via === 'lan' ? '局域网' : '云端';
+        banner('已下发：' + (c.name || '') + ' → ' + fmtDetailValue(c, v) + '（' + via + '）', 'ok');
+      }).catch(function (e) {
+        banner('『' + (c.name || '') + '』下发失败：' + errText(e), 'err');
+      }).then(function () {
+        btn.disabled = false;
+        scheduleHeight();
+      });
+    });
+
+    row.appendChild(ic);
+    row.appendChild(nm);
+    row.appendChild(slider);
+    row.appendChild(val);
+    row.appendChild(btn);
+    card.appendChild(row);
+    return row;
+  }
+
   /** 行图标（内联 SVG，不用 emoji：跨平台渲染差异太大）。 */
   function dtIcon(kind) {
     var paths = {
@@ -1833,12 +1968,16 @@
       var ctlCard = detailCard(panes.ctl, '', controls.length);
       controls.forEach(function (c) {
         if (c.kind === 'action') {
-          detailItem(ctlCard, dtIconOf(c), c.name || c.instance_id, '按钮 · 平台设备页下发', true);
+          actionRow(ctlCard, c);
           return;
         }
         var key = c.siid + '.' + c.piid;
         if (c.capability === 'switch' && typeof values[key] === 'boolean') {
           switchRow(ctlCard, c, true, values);
+          return;
+        }
+        if (c.capability === 'number' && typeof c.min === 'number' && typeof c.max === 'number') {
+          valueRow(ctlCard, c, values);
           return;
         }
         var v = values[key];
