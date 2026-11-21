@@ -17,7 +17,9 @@
  *    原草稿机制（draftEdits + 统一保存）随之移除 —— 保存语义从"攒一批"变为"即时"，
  *    这是设计图直接要求的交互形态。
  *  · 账号行内开关视觉上按行显示，但 save_password 是**全插件共享**的配置 ——
- *    所有行的开关与顶部开关显示同一份真实状态，改任一处即全量保存并重渲染。
+ *    所有行的开关显示同一份真实状态，改任一处即全量保存并重渲染。
+ *    （2026-11-21 删除了独立的「Token 自动续期」行 —— 与行内开关重复，
+ *    行内开关是唯一入口。）
  *  · 同步任务表内「编辑」展开行内编辑条（家庭 / 周期 / 自动同步），保存即生效。
  *  · 「同步设备 / 设备管理」合并了旧"同步结果"卡：统计磁贴（总数/在线/离线/
  *    能力待完善）+ 设备列表 + 详情（控制 / 传感器 / 配置 三个页签）。
@@ -442,7 +444,6 @@
 
   function renderConfig() {
     var savePw = config.save_password !== false;
-    el('f-save-password').checked = savePw;
     applyTokenLinkage(savePw);
     // 命令优先通道：默认 lan
     var pri = config.lan_priority || 'lan';
@@ -661,7 +662,8 @@
           row.appendChild(pill);
         }
 
-        // Token 自动续期开关：视觉按行显示，实际是**全插件共享**的 save_password。
+        // Token 自动续期开关：save_password 是**全插件共享**配置。独立行已于
+        // 2026-11-21 删除（与行内开关重复），这里就是唯一入口。
         var swLabel = document.createElement('label');
         swLabel.className = 'sw';
         swLabel.setAttribute('title', 'Token 自动续期（全插件共享设置）');
@@ -674,7 +676,6 @@
         swLabel.appendChild(ui);
         inp.addEventListener('change', function () {
           var on = inp.checked;
-          el('f-save-password').checked = on;
           saveConfigNow({ save_password: on }, on ? 'Token 自动续期已开启' : 'Token 自动续期已关闭')
             .then(function () {
               applyTokenLinkage(on);
@@ -732,8 +733,6 @@
     el('login-form').hidden = false;
     el('challenge').hidden = true;
     clearBanner();
-    // 每次打开都回到「账号密码」，避免上次留在扫码页、用户以为没有密码入口
-    setLoginMode('pass');
     scheduleHeight();
   }
 
@@ -2268,7 +2267,6 @@
   function startQrLogin() {
     stopQrPolling();
     var btn = el('btn-qr-start');
-    var cancel = el('btn-qr-cancel');
     if (btn) btn.disabled = true;
     setQrState('正在获取二维码…');
     rpc('plugin.tool.call', { tool: 'qr_svg', args: {} })
@@ -2281,7 +2279,6 @@
         }
         renderQrSvg(data.svg);
         setQrState('等待扫码…（手机上确认后这里会自动完成）');
-        if (cancel) cancel.hidden = false;
         pollQr(++qrSeq);
       })
       .catch(function (e) {
@@ -2327,42 +2324,18 @@
   function cancelQrLogin() {
     stopQrPolling();
     rpc('plugin.tool.call', { tool: 'qr_cancel', args: {} }).catch(function () {});
-    var cancel = el('btn-qr-cancel');
-    if (cancel) cancel.hidden = true;
     var btn = el('btn-qr-start');
     if (btn) btn.disabled = false;
     setQrState('已取消');
     var box = el('qr-img');
     if (box) {
       box.className = 'qrbox__img muted small';
-      box.textContent = '点「生成二维码」后，用手机上的小米商城 / 米家 App 扫码确认登录';
+      box.textContent = '尚未生成二维码';
     }
   }
 
-  /** 登录方式切换：账号密码 / 扫码登录（并排两个按钮，点击切页）。 */
-  function setLoginMode(mode) {
-    var seg = el('login-seg');
-    if (seg) {
-      for (var i = 0; i < seg.children.length; i++) {
-        var b = seg.children[i];
-        b.className = 'seg__btn' + (b.getAttribute('data-mode') === mode ? ' seg__btn--on' : '');
-      }
-    }
-    var pPass = el('login-pane-pass');
-    var pQr = el('login-pane-qr');
-    if (pPass) pPass.hidden = mode !== 'pass';
-    if (pQr) pQr.hidden = mode !== 'qr';
-    var loginBtn = el('btn-login');
-    if (loginBtn) loginBtn.hidden = mode === 'qr';
-    if (mode !== 'qr') {
-      cancelQrLogin();
-    } else {
-      // 切到扫码页时，若还没开始过就别显示"已取消"这种上一轮残留
-      var st = el('qr-state');
-      if (st && (st.textContent === '已取消' || st.textContent === '')) setQrState('未开始');
-    }
-    scheduleHeight();
-  }
+  /* 两栏并排后没有页签了（2026-11-21 用户确认效果图）：扫码与账号密码
+     同屏常驻，旧的 setLoginMode / login-seg / login-pane-* 全部移除。 */
 
   /* ── 健康检查 + 局域网状态 ────────────────────────────── */
 
@@ -2640,37 +2613,15 @@
     });
     el('btn-add').addEventListener('click', openLogin);
     el('btn-cancel-login').addEventListener('click', hideLoginForm);
-    // 登录方式并排切换
-    var seg = el('login-seg');
-    if (seg) {
-      seg.addEventListener('click', function (ev) {
-        var t = ev.target;
-        if (!t || !t.getAttribute) return;
-        var mode = t.getAttribute('data-mode');
-        if (mode) setLoginMode(mode);
-      });
-    }
+    // 登录卡两栏并排（左扫码 / 右账号密码），无页签可绑；只挂「生成二维码」。
     var qrStart = el('btn-qr-start');
     if (qrStart) qrStart.addEventListener('click', startQrLogin);
-    var qrCancel = el('btn-qr-cancel');
-    if (qrCancel) qrCancel.addEventListener('click', cancelQrLogin);
     el('btn-login').addEventListener('click', startLogin);
     el('btn-logout-session').addEventListener('click', logoutAccount);
     el('btn-verify').addEventListener('click', submitVerify);
     el('btn-verify-web').addEventListener('click', submitVerifyWeb);
 
-    // Token 自动续期（页头开关）：即时保存 + 联动
-    var sp = el('f-save-password');
-    if (sp) {
-      sp.addEventListener('change', function () {
-        var on = !!sp.checked;
-        saveConfigNow({ save_password: on }, on ? 'Token 自动续期已开启' : 'Token 自动续期已关闭')
-          .then(function () {
-            applyTokenLinkage(on);
-            renderAccounts(accountsCache, accountNamesCache);
-          });
-      });
-    }
+    // Token 自动续期开关挂在账号行内（独立行 2026-11-21 删除），无页头开关。
     // 控制通道：优先级即时保存
     var radios = document.querySelectorAll('input[name="lan-priority"]');
     for (var i = 0; i < radios.length; i++) {
