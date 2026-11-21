@@ -85,8 +85,36 @@ func deviceSwitchTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 	var lanErr, cloudErr error
 	source := ""
 
+	/*
+	 * ★★ 2026-11-21 实测（用户「台灯配置按钮和开关按钮一样的能力映射错误了」）：
+	 *
+	 * 台灯（chuangmi.plug.m3）写**指示灯**（siid=3/piid=1）时，走局域网
+	 * `set_properties` 会被固件当成"主开关"处理 —— 实测：写 3.1=false 之后
+	 * 回读 2.1 从 true 变成 false，而 3.1 立刻又回 true（设备根本没接受这次
+	 * 指示灯写入，只是把整机断电了）。
+	 *
+	 * 云端 `miotspec/prop/set` 是按 (siid,piid) 精确路由的，不会串 —— 这也是
+	 * 参考实现的写法。所以：
+	 *   · 主开关（primary）→ 局域网优先（快、不吃云会话）
+	 *   · 辅助开关（指示灯 / 静音 / 睡眠模式）→ **云端优先**，失败再回落局域网
+	 */
+	primarySwitch := in.Primary
+	if !primarySwitch {
+		if sessionID, ssec, devID, oerr := openCloudSession(ctx); oerr == nil {
+			rows, rerr := cloudRequestMIoTSpec(ctx, sessionID, ssec, devID, "prop/set", params)
+			_ = ctx.HTTPClose(sessionID)
+			if rerr == nil && firstErrorCode(rows) == 0 {
+				source = "cloud"
+			} else if rerr != nil {
+				cloudErr = rerr
+			}
+		} else {
+			cloudErr = oerr
+		}
+	}
+
 	// ① 局域网（lumi.* 是网关子设备，直连必超时，直接跳过）
-	if !strings.HasPrefix(strings.ToLower(d.Model), "lumi.") && strings.TrimSpace(d.Host) != "" {
+	if source == "" && !strings.HasPrefix(strings.ToLower(d.Model), "lumi.") && strings.TrimSpace(d.Host) != "" {
 		if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil && len(tok) == 16 {
 			rows, rerr := miioBatchProperties(ctx, d, tok, "set_properties", params)
 			if rerr == nil {

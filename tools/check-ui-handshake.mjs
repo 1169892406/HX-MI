@@ -236,7 +236,8 @@ fakePort.postMessage = (frame) => {
     if (tool === 'accounts') result = ACCOUNTS_OK;
     else if (tool === 'account') result = ACCOUNT_VIEW;
     else if (tool === 'health_list') result = { devices: [
-      { name: '台灯', model: 'chuangmi.plug.m3', version: '1.2.3', path: '局域网直连', status: '在线', latency_ms: 12,
+      { name: '台灯', model: 'chuangmi.plug.m3', version: '1.2.3', path: '局域网直连',
+        path_detail: '局域网 192.168.1.75', did: '100', status: '在线', latency_ms: 12,
         account: '1169892406@qq.com' },
       { name: '补光灯', model: 'chuangmi.plug.m1', version: '1.0.9', path: '云端下发', status: '离线', latency_ms: 0 },
     ] };
@@ -318,9 +319,13 @@ console.log('== U19 回来的数据真的能渲染');
   ok('U19k 账号行显示「Token 更新于」（会话归属行）',
     collectText(getEl('accounts')).includes('Token 更新于'),
     'accounts 工具给了 token_updated_at/token_account，对应行必须显示');
-  ok('U19l 健康表行带同步来源账号副行',
-    typeof hth.innerHTML === 'string' && hth.innerHTML.includes('1169892406@qq.com'),
-    '健康行 account 字段要显示出来，否则按账号过滤没法核对');
+  // 2026-11-21 用户裁定：健康表**不再**印账号副行（顶端已有「所属账号」筛选）。
+  // 断言改为「设备名与路径仍在」+「不再重复账号」——跟着产品口径走，不守旧文案。
+  ok('U19l 健康表行只有设备名与通信路径（账号副行已按用户要求移除）',
+    typeof hth.innerHTML === 'string' && hth.innerHTML.includes('台灯')
+      && hth.innerHTML.includes('192.168.1.75')
+      && !hth.innerHTML.includes('1169892406@qq.com'),
+    '顶端有账号筛选，行内重复账号是噪音');
   ok('U19m 冗余小字已删（风险盒/探测备注/绑定备注/拆分备注）',
     !HTML.includes('riskbox') && !HTML.includes('nohint')
       && !HTML.includes('addsync-note') && !HTML.includes('filters__note'),

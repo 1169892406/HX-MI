@@ -2451,7 +2451,11 @@
       var rowSel = rowDid && rowDid === healthSelDid ? ' class="hrow hrow--sel"' : ' class="hrow"';
       html += '<tr' + rowSel + ' data-did="' + esc(rowDid) + '">' +
         '<td><span class="hname">' + esc(d.name) + '</span>' +
-        (d.account ? '<span class="hsub">' + esc(d.account) + '</span>' : '') +
+        /*
+         * 账号副行已删（2026-11-21 用户：「这个账号显示多余了，上面有账号筛选」）。
+         * 同一屏顶端就有「所属账号」筛选框，每行再印一遍邮箱是纯噪音；
+         * 设备归属仍可从筛选框+行数推断，信息没丢。
+         */
         (d.path_detail ? '<span class="hsub">' + esc(d.path_detail) + '</span>' : '') + '</td>' +
         '<td><span class="hver">' + esc(d.model) + '</span></td>' +
         '<td><span class="hver">' + esc(d.version || '-') + '</span></td>' +
