@@ -292,6 +292,21 @@ func (r *qrRuntime) exchange(out map[string]any) (string, error) {
 		s.State = "failed"
 		// 换票、密封、探针全部留在**取票那个会话**里（ssecurity ↔ serviceToken 配对）
 		s.HostSessionID = sess2
+		/*
+		 * ★★ 2026-11-22（`invalid signature` 的最终根因）：
+		 *
+		 * 这一行**必须**写。上面取票用的是 `freshID`（新 deviceId），因此 passport
+		 * 下发的 serviceToken 是**绑定 freshID** 的；而 `s.DeviceID` 在 exchange
+		 * 开头被设成了落盘的旧 deviceId。RC4 探针会用 s.DeviceID 拼
+		 * `Cookie: deviceId=…` 与 UA，于是服务端看到"票据绑 A、请求自称 B"，
+		 * 直接回 `{"code":0,"message":"invalid signature"}`（小米用这个错误表示
+		 * deviceId 与票据不匹配，容易误判成签名算法问题）。
+		 *
+		 * 用户实测错误正是：`xiaomiio 换票：小米业务接口拒绝（code=0，
+		 * 说明：invalid signature）（本次已密封票据 3 条）` —— 票据拿得到，
+		 * 只是 deviceId 对不上。
+		 */
+		s.DeviceID = freshID
 		_, e2 := exchangeAndProbe(ctx, sess2, s, loc2, ssec2, pt2)
 		_ = ctx.HTTPClose(sess2)
 		if e2 == nil {
