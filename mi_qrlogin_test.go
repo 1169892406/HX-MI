@@ -188,3 +188,12 @@ func TestQRStatusReflectsState(t *testing.T) {
 		t.Fatalf("qrCancelTool: %v", err)
 	}
 }
+
+// 钉住 70036 的根因：Client 的 TokenPath 与 qrRuntime 的键必须指向同一份文件。
+// 写成 "qrlogin/.mi.token" 时 runtime 会再加一次前缀 ⇒ `qrlogin/qrlogin/.mi.token`，
+// bootstrap 与换票拿到两个不同 deviceId。
+func TestQRTokenKeyIsShared(t *testing.T) {
+	if got := qrOptionsTokenPath(); got != ".mi.token" {
+		t.Fatalf("TokenPath = %q（期望 .mi.token；带 qrlogin/ 前缀会与 runtime 前缀叠加）", got)
+	}
+}

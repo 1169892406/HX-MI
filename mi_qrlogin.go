@@ -257,23 +257,39 @@ func (r *qrRuntime) exchange(out map[string]any) (string, error) {
 	}
 	ctx.Log(2, fmt.Sprintf("hx-mi qr 主路径换票失败: %v", perr))
 
-	// 兜底：用 lp 带出的 passToken 走 serviceLogin 免密重取一次
-	// （与 qrlogin.miLogin 同语义；HTTPSession 允许显式 Cookie 头）。
+	// 兜底：用 lp 带出的 passToken 走 serviceLogin 免密重取。
+	//
+	// 与 console（/deepseek-work/xiaoai-speaker-console，用户实测正常）的两个
+	// 关键对齐（2026-11-22）：
+	//   ① 兜底用**新生成的 deviceId**（console 就是 `tok["deviceId"] = randomHex(16)`）。
+	//      沿用扫码那台的 id 会让 passport 把"新设备 + 老 passToken"判成异常，
+	//      回 70036「系统错误」；
+	//   ② 服务域逐个试：xiaomiio（MIoT 云要用它）→ micoapi（console 用它）。
+	var errs []string
+	if perr != nil {
+		errs = append(errs, "主路径 "+perr.Error())
+	}
 	if passToken != "" {
-		if loc2, ssec2, pt2, ferr := r.serviceLoginWithPassToken(ctx, sess, deviceID, userID, passToken); ferr == nil {
-			s.State = "failed"
-			_, e2 := exchangeAndProbe(ctx, sess, s, loc2, ssec2, pt2)
-			if e2 == nil {
-				r.finish(userID, pt2, deviceID)
-				return userID, nil
+		for _, sid := range []string{"xiaomiio", "micoapi"} {
+			freshID := qrDeviceID()
+			loc2, ssec2, pt2, ferr := r.serviceLoginWithPassToken(ctx, sess, sid, freshID, userID, passToken)
+			if ferr != nil {
+				errs = append(errs, fmt.Sprintf("兜底 %s：%v", sid, ferr))
+				continue
 			}
-			perr = e2
-		} else {
-			perr = ferr
+			s.State = "failed"
+			if _, e2 := exchangeAndProbe(ctx, sess, s, loc2, ssec2, pt2); e2 == nil {
+				r.finish(userID, pt2, freshID)
+				return userID, nil
+			} else {
+				errs = append(errs, fmt.Sprintf("兜底 %s 换票：%v", sid, e2))
+			}
 		}
+	} else {
+		errs = append(errs, "兜底：扫码结果没有 passToken")
 	}
 	r.closeSession()
-	return "", perr
+	return "", fmt.Errorf("%s", strings.Join(errs, "；"))
 }
 
 // finish 换票成功的收尾：稳定设备标识与会话材料落盘（下个实例重启后
@@ -296,14 +312,17 @@ func (r *qrRuntime) finish(userID, passToken, deviceID string) {
 
 // serviceLoginWithPassToken 用 passToken 免密换新的一组 (location, ssecurity)。
 // Cookie 头显式携带（HTTPSession 允许插件设置 Cookie；jar 里的同名 cookie 会并排附加）。
-func (r *qrRuntime) serviceLoginWithPassToken(ctx *plugin.Context, sess, deviceID, userID, passToken string) (string, string, string, error) {
+func (r *qrRuntime) serviceLoginWithPassToken(ctx *plugin.Context, sess, sid, deviceID, userID, passToken string) (string, string, string, error) {
+	if sid == "" {
+		sid = "xiaomiio"
+	}
 	cookie := fmt.Sprintf("sdkVersion=3.9; deviceId=%s; passToken=%s", deviceID, passToken)
 	if userID != "" {
 		cookie = fmt.Sprintf("sdkVersion=3.9; deviceId=%s; userId=%s; passToken=%s", deviceID, userID, passToken)
 	}
 	resp, err := ctx.HTTPSessionDo(plugin.HTTPSessionRequest{
 		SessionID: sess, Method: "GET",
-		URL: "https://account.xiaomi.com/pass/serviceLogin?sid=xiaomiio&_json=true",
+		URL: "https://account.xiaomi.com/pass/serviceLogin?sid=" + sid + "&_json=true",
 		Headers: map[string]string{
 			"Cookie":     cookie,
 			"User-Agent": qrlogin.RandomUA(),
@@ -391,7 +410,20 @@ func qrClientFor(ctx *plugin.Context) *qrlogin.Client {
 		qrRT = &qrRuntime{}
 		qrRT.setContext(ctx)
 		qrClient = qrlogin.New(qrlogin.Options{
-			TokenPath: "qrlogin/.mi.token",
+			/*
+			 * ★★ 2026-11-22（扫码 70036 根因）：
+			 *
+			 * 这里必须写 **".mi.token"**，不能写 "qrlogin/.mi.token"。
+			 * qrRuntime.Get/Put 自己会加 qrStorePrefix（"qrlogin/"）前缀，而
+			 * qrlogin.Client 把 TokenPath 原样交给 store —— 于是写成
+			 * "qrlogin/.mi.token" 时实际落盘键是 `qrlogin/qrlogin/.mi.token`：
+			 *   · bootstrap 读不到 seedDeviceID 写的那份 ⇒ 每次随机一个 deviceId
+			 *     （且只有扫码成功才落盘）；
+			 *   · 换票/兜底走 r.deviceID() 读的是 `qrlogin/.mi.token` ⇒ 另一个 id。
+			 * passport 看到的"设备"前后不一致，免密 serviceLogin 直接回
+			 * `code=70036 系统错误：请稍后再试`（用户截图那条）。
+			 */
+			TokenPath: ".mi.token",
 			// 与密码登录/账号体系同域：探针（api.io.mi.com RC4）与回调落地
 			// （sts.api.io.mi.com，白名单内）都按 xiaomiio 发票。
 			Sid:             "xiaomiio",
@@ -409,6 +441,11 @@ func qrClientFor(ctx *plugin.Context) *qrlogin.Client {
 	qrRT.setContext(ctx)
 	return qrClient
 }
+
+// qrOptionsTokenPath 暴露给测试：Client 的 TokenPath 必须是不带 qrlogin/ 前缀的键
+// （runtime 的 Get/Put 会自己加前缀；两处叠加会让 bootstrap 与换票用两个 deviceId，
+// passport 回 70036 —— 2026-11-22 实测根因）。
+func qrOptionsTokenPath() string { return ".mi.token" }
 
 // qrStartTool 发起扫码：返回二维码内容与状态（前端渲染二维码并轮询）。
 func qrStartTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
