@@ -55,26 +55,31 @@
   }
 
   /**
-   * 内容区高度：`documentElement.scrollHeight` 与 `body` 盒高取**较大者**。
+   * 内容区高度。
    *
-   * 为什么不是单纯 body.scrollHeight：body 有 margin 时 scrollHeight 不含外边距，
-   * 报出去会少几像素（底部被切）。getBoundingClientRect().height 含 padding/border
-   * 但不含 margin，所以再补上 body 的上下 margin —— 这是"内容真实占位"的口径。
+   * ## 为什么**不能**用 documentElement.scrollHeight（2026-11-22 修）
+   *
+   * scrollHeight 至少等于视口高度。宿主把 iframe 设成插件上报的高度之后，
+   * 视口就变成了那个高度 ⇒ 下一轮测量拿到的 scrollHeight ≥ 上一轮上报值
+   * ⇒ **只增不减**。实测后果：内容收缩（详情区清空、列表折叠）后仍有几百像素
+   * 空白留在页面里，用户截图就是"内容下面一大片空的"。
+   *
+   * 所以只取**内容自身**的高度：
+   *   · body 盒高 + body 上下 margin（getBoundingClientRect 不含 margin）；
+   *   · body.scrollHeight（同样是内容口径，不被视口撑大）；
+   * 两者取大。子元素绝对定位/浮动溢出的情况由 scrollHeight 兜住。
    */
   function measure() {
-    var docEl = document.documentElement;
     var body = document.body;
-    var h1 = docEl ? docEl.scrollHeight : 0;
-    var h2 = 0;
-    if (body) {
-      var r = body.getBoundingClientRect();
-      h2 = r.height;
-      var cs = global.getComputedStyle ? global.getComputedStyle(body) : null;
-      if (cs) {
-        h2 += (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
-      }
+    if (!body) return 0;
+    var rect = body.getBoundingClientRect();
+    var h = rect.height;
+    var cs = global.getComputedStyle ? global.getComputedStyle(body) : null;
+    if (cs) {
+      h += (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
     }
-    return Math.max(h1 || 0, h2 || 0);
+    if (body.scrollHeight > h) h = body.scrollHeight;
+    return h;
   }
 
   function start(opts) {
@@ -87,6 +92,25 @@
     var stopped = false;
     var observer = null;
     var hostScrollbar = false;
+    var hostBackProvided = false;
+
+    /**
+     * 隐藏插件自带的「返回插件列表」按钮（宿主已提供同一个入口）。
+     *
+     * 判据刻意窄：文本包含「返回」且是按钮/链接 —— 宁可漏掉（多一颗按钮），
+     * 也不要把插件里别的按钮误藏（那是"改 UI 砍功能"，用户明令禁止）。
+     */
+    function hideOwnBackButton() {
+      try {
+        var nodes = document.querySelectorAll('button, a, [role="button"]');
+        for (var i = 0; i < nodes.length; i++) {
+          var t = (nodes[i].textContent || '').trim();
+          if (t.indexOf('返回') !== -1 && t.length <= 16) {
+            nodes[i].setAttribute('hidden', 'hidden');
+          }
+        }
+      } catch (e) {}
+    }
 
     function report() {
       if (stopped || !rpc) return;
@@ -133,6 +157,15 @@
         schedule();                     // 区间变了，之前的高度可能已被旧区间截断
       }
       if (frame.scrollbar === 'host') applyHostScrollbar();
+      /*
+       * host_back：宿主工具条已带「返回」，插件内那颗同名按钮要隐藏
+       * （2026-11-22 用户截图：两颗按钮上下堆在右上角）。
+       * 只隐藏"返回"这一个入口，不碰插件的其它按钮。
+       */
+      if (frame.host_back) {
+        hostBackProvided = true;
+        hideOwnBackButton();
+      }
     }
 
     if (typeof global.ResizeObserver === 'function') {
