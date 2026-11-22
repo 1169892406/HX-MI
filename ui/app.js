@@ -2332,7 +2332,14 @@
         // scanned / waiting / idle 都继续等；把插件的提示原样显示（不编文案）
         if (d && d.message) setQrState(d.message);
         else if (st === 'waiting') setQrState('等待扫码…');
-        qrTimer = setTimeout(function () { pollQr(seq); }, 2000);
+        /*
+         * 8 秒（2026-11-23 从 2 秒上调）。插件侧单次 qr_status 会做一次 1.2 秒长轮询，
+         * 而 wasm 是单线程 —— 轮询间隔太密会让「扫码等待」把其它调用（刷新账号、
+         * 设备详情）挤到 30 秒上限被杀，症状是 PLUGIN_SANDBOX_CRASH。
+         * 服务器实测：1.2s 超时 + 8s 间隔连问 8 次，0 次被小米 403。
+         * 代价：扫码确认后最多 8 秒才在页面上显示成功 —— 换来整页不再被拖垮。
+         */
+        qrTimer = setTimeout(function () { pollQr(seq); }, 8000);
       })
       .catch(function (e) {
         if (seq !== qrSeq) return;

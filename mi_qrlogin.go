@@ -611,7 +611,31 @@ func qrStatusTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, e
 	 * 前提：部署 `plugin.execution_timeout_ms` 必须 ≥30000（这台机器原来写 3000，
 	 * 插件根本没法做长轮询；已调整为 30000）。
 	 */
-	c.Poll(25 * time.Second)
+	/*
+	 * ★★★ 1.2 秒（2026-11-23 定稿；历史取值 2200ms → 800ms → 25000ms → 5s → 1.2s）
+	 *
+	 * ## 为什么必须这么短
+	 *
+	 * wasm 是**单线程**：Poll 在等网络时整条执行流被占住，期间到达的任何调用
+	 * （前端每轮回的 qr_status、用户点「刷新」的 accounts、详情页的 device_detail）
+	 * 都只能排队。只要一次 Poll 占太久，队列就会顶穿平台 30 秒上限，症状是
+	 *   `PLUGIN_SANDBOX_CRASH: 沙箱实例已不可用（module closed with context
+	 *    deadline exceeded）`，
+	 * 用户看到的是「读取账号失败」「设备详情读不出来」—— 与扫码本身无关的功能
+	 * 一起遭殃。取值越大越危险：25s 时 2 秒一次的前端轮询必然堆积。
+	 *
+	 * ## 为什么不怕小米 403
+	 *
+	 * 之前实测 800ms + 2s 间隔，第 6 次（约 12 秒）起被 403 —— 但那是
+	 * **连接频率**（每 2.8s 新建一次）过高，不是"断得太早"。
+	 * 服务器实测（2026-11-23）：**1.2s 超时 + 8s 间隔，连问 8 次 0 次 403**。
+	 * 前端轮询间隔已相应调到 8 秒（见 ui/app.js），一次连接约 9.2 秒一次，
+	 * 与实测安全节奏一致。
+	 *
+	 * 净效果：单次只占用执行流 1.2s（≈15%），队列不可能堆积；扫码成功后
+	 * 最多 8 秒内被前端下一拍发现。
+	 */
+	c.Poll(1200 * time.Millisecond)
 	st := c.Status()
 	out := map[string]any{
 		"ok":         true,

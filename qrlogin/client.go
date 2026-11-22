@@ -67,13 +67,26 @@ type Client struct {
 	/* 最近一次轮询诊断 */
 	pollStatus int
 	pollNote   string
-	deadline   time.Time
-	userID     string
-	waitStop   chan struct{}
-	waiting    bool
-	o          Options
-	tr         Transport
-	store      storeBucket
+	/*
+	 * pollInFlight 防止 Poll 重入（2026-11-22 实测事故）。
+	 *
+	 * wasm 是**单线程**：一次 Poll 在等网络时整条执行流被占住，期间到达的
+	 * qr_status（前端每 2 秒一次）与用户触发的 accounts 全部排队。Poll 原来给
+	 * 25 秒，队列稍长就顶穿平台 30 秒上限 ⇒ `PLUGIN_SANDBOX_CRASH:
+	 * 沙箱实例已不可用（module closed with context deadline exceeded）`，
+	 * 用户看到的是「读取账号失败」。
+	 *
+	 * 有了这个标志：已有一次在飞时，新的 Poll **立刻返回**当前状态（前端下一拍
+	 * 再来问），队列不可能堆积。
+	 */
+	pollInFlight bool
+	deadline     time.Time
+	userID       string
+	waitStop     chan struct{}
+	waiting      bool
+	o            Options
+	tr           Transport
+	store        storeBucket
 }
 
 // Options 构造参数。零值可用（TokenPath 必填才有落盘）。
@@ -266,6 +279,11 @@ func (c *Client) Status() Status {
 // 看到 state != waiting 就退出）。
 func (c *Client) Poll(timeout time.Duration) {
 	c.mu.Lock()
+	if c.pollInFlight {
+		// 已有一次长轮询在等网络：立刻返回，绝不排队（见 pollInFlight 注释）。
+		c.mu.Unlock()
+		return
+	}
 	/*
 	 * 只要求"票还在有效期内且有 lp 地址"，**不要求 state==waiting**。
 	 *
@@ -287,7 +305,14 @@ func (c *Client) Poll(timeout time.Duration) {
 	lpURL := c.lpURL
 	headers := c.lpHeaders
 	deadline := c.deadline
+	c.pollInFlight = true
 	c.mu.Unlock()
+	// 无论走哪条分支都要清标志，否则轮询永久停摆。
+	defer func() {
+		c.mu.Lock()
+		c.pollInFlight = false
+		c.mu.Unlock()
+	}()
 
 	if !time.Now().Before(deadline) {
 		c.mu.Lock()
