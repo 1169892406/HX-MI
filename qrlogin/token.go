@@ -231,6 +231,27 @@ func trunc(s string, n int) string {
 	return s
 }
 
+// tokenLikeBody 判断回调响应体是否像"裸 token"。
+//
+// 兜底分支曾把 <512 字节的响应体一律当 serviceToken 收下——小米回错误页/
+// 错误 JSON 时会"假成功"并把垃圾落盘成凭据。这里只收明确不像页面/JSON 的内容。
+func tokenLikeBody(b []byte) bool {
+	if len(b) == 0 || len(b) >= 512 {
+		return false
+	}
+	s := string(b)
+	if strings.ContainsAny(s, "<>{}") || strings.Contains(strings.ToLower(s), "html") {
+		return false
+	}
+	// token 是连续可打印字符（无空白/换行）
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			return false
+		}
+	}
+	return true
+}
+
 func randomHex(n int) string {
 	const hexdigits = "0123456789ABCDEF"
 	b := make([]byte, n)
@@ -241,8 +262,10 @@ func randomHex(n int) string {
 	return string(b)
 }
 
+// RandomUA 导出的随机机型 UA（宿主适配层组装请求头用；与 randomUA 同一生成器）。
+func RandomUA() string { return randomUA() }
+
 func randomUA() string {
-	// 每次登录换一个机型串，降低被 passport 判定为同一客户端的概率
 	h := func(n int) string {
 		const hexdigits = "0123456789ABCDEF"
 		b := make([]byte, n)

@@ -27,11 +27,19 @@ import (
 	"time"
 )
 
+// sid 服务域参数与 token 键名。Sid() 取运行时配置（默认 micoapi）。
 const (
 	sid         = "micoapi"
 	defaultPass = "https://account.xiaomi.com/pass"
 	longPolling = "https://account.xiaomi.com/longPolling/loginUrl"
 )
+
+func (c *Client) sid() string {
+	if c.o.Sid != "" {
+		return c.o.Sid
+	}
+	return sid
+}
 
 // Status 扫码会话状态。
 type Status struct {
@@ -62,12 +70,26 @@ type Client struct {
 // 受限运行时（wasm 插件等）注入自己的 Transport 与 Store；
 // 不注入时使用默认的 net/http + 文件。
 type Options struct {
-	TokenPath   string       // .mi.token 落盘键；Store 决定它落在哪里
-	Passport    string       // passport 基址，默认官方；测试时指向 httptest
+	TokenPath string // .mi.token 落盘键；Store 决定它落在哪里
+	Passport  string // passport 基址，默认官方；测试时指向 httptest
+	// Sid 登录服务域：默认 micoapi（小爱）；米家设备类接入用 xiaomiio。
+	// 注意：内置组装路径（未设 Exchange）落盘的 token 文件键名固定为 micoapi
+	// （miservice 兼容格式）——改 Sid 时应配合 Exchange，由宿主适配层自行组装凭据。
+	Sid         string
 	HTTP        *http.Client // 长轮询用（默认 90s 超时）；Transport 为 nil 时生效
 	ServiceHTTP *http.Client
 	Logger      *log.Logger // nil = 标准日志
 	OnToken     func(Token) // 扫码成功（已落盘）后的回调
+
+	// Exchange 接管"扫码确认后的换票"整段：长轮询拿到 code=0 的结果后，
+	// Client 不再做 clientSign 回调 / Set-Cookie 组装 / 落盘，而是把原始
+	// 结果（location/nonce/ssecurity/passToken/userId/deviceId…）交给它。
+	//
+	// 为什么需要：宿主托管 cookie 的运行时（wasm 插件的 HTTPSession）里，
+	// Set-Cookie 永远不回插件、cookie 由宿主 jar 收发——插件侧根本"看不见"
+	// serviceToken，内置的组装路径必失败。Exchange 返回 userID 视为成功；
+	// 返回 error 则进入 error 状态。nil = 走内置路径（net/http 场景）。
+	Exchange func(out map[string]any) (string, error)
 
 	// 可插拔底层（默认 net/http + 文件）：
 	Transport       Transport
@@ -234,7 +256,7 @@ func (c *Client) bootstrap() (map[string]any, error) {
 	}
 	headers["Cookie"] = fmt.Sprintf("sdkVersion=3.9; deviceId=%s; passToken=", deviceID)
 
-	body, _, err := c.httpGet(c.o.Passport+"/serviceLogin?sid="+sid+"&_json=true", headers)
+	body, _, err := c.httpGet(c.o.Passport+"/serviceLogin?sid="+c.sid()+"&_json=true", headers)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +341,21 @@ func (c *Client) wait(data map[string]any, stop chan struct{}) {
 
 // handleScanResult 扫码成功后的换取与落盘（从 wait 中拆出，便于循环调用）。
 func (c *Client) handleScanResult(out map[string]any, headers map[string]string, stop chan struct{}) {
+	// 宿主托管 cookie 的运行时（wasm HTTPSession）：换票整段由注入方完成。
+	// 那里的 Set-Cookie 永远不回插件，内置的组装路径在那类环境必失败。
+	if c.o.Exchange != nil {
+		uid, err := c.o.Exchange(out)
+		if err != nil {
+			c.fail("换取会话失败：" + err.Error())
+			return
+		}
+		if uid == "" {
+			uid = strOf(out["userId"])
+		}
+		c.success(uid)
+		return
+	}
+
 	// 关键：location 必须带 clientSign（sha1(nonce&ssecurity) 的 base64）再取，
 	// 否则小米只回一个页面、不种 serviceToken
 	loc := strOf(out["location"])
@@ -337,7 +374,7 @@ func (c *Client) handleScanResult(out map[string]any, headers map[string]string,
 		if serviceToken == "" {
 			if b, _, e := c.httpGet(loc+sep+"clientSign="+url.QueryEscape(sign), headers); e == nil {
 				b = []byte(strings.TrimSpace(string(b)))
-				if len(b) > 0 && len(b) < 512 {
+				if tokenLikeBody(b) {
 					serviceToken = string(b)
 				}
 			}
@@ -488,7 +525,7 @@ func (c *Client) miLogin() (string, string) {
 	if serviceToken == "" {
 		if b, _, e := c.httpGet(loc+sep+"clientSign="+url.QueryEscape(sign), nil); e == nil {
 			b = []byte(strings.TrimSpace(string(b)))
-			if len(b) > 0 && len(b) < 512 {
+			if tokenLikeBody(b) {
 				serviceToken = string(b)
 			}
 		}
