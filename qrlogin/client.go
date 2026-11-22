@@ -17,7 +17,6 @@
 package qrlogin
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -313,7 +312,7 @@ func (c *Client) Poll(timeout time.Duration) {
 		return
 	}
 	out := map[string]any{}
-	if json.Unmarshal(passportStrip(resp.Body), &out) != nil {
+	if parsePassportJSON(resp.Body, &out) != nil {
 		c.mu.Lock()
 		c.pollStatus = resp.Status
 		c.pollNote = fmt.Sprintf("非 JSON(%dms, %d bytes): %s", time.Since(startedAt).Milliseconds(),
@@ -393,7 +392,7 @@ func (c *Client) bootstrap() (map[string]any, error) {
 		return nil, err
 	}
 	data := map[string]any{}
-	if json.Unmarshal(passportStrip(body), &data) != nil {
+	if parsePassportJSON(body, &data) != nil {
 		return nil, fmt.Errorf("serviceLogin 返回异常: %.120s", body)
 	}
 	loc := strOf(data["location"])
@@ -417,7 +416,7 @@ func (c *Client) bootstrap() (map[string]any, error) {
 		return nil, err
 	}
 	out := map[string]any{}
-	if json.Unmarshal(passportStrip(body), &out) != nil {
+	if parsePassportJSON(body, &out) != nil {
 		return nil, fmt.Errorf("longPolling/loginUrl 返回异常: %.120s", body)
 	}
 	return out, nil
@@ -457,7 +456,7 @@ func (c *Client) wait(data map[string]any, stop chan struct{}) {
 		body := resp.Body
 
 		out := map[string]any{}
-		if json.Unmarshal(passportStrip(body), &out) != nil {
+		if parsePassportJSON(body, &out) != nil {
 			/*
 			 * ★ 2026-11-22（用户「app 提示扫码成功登录了，插件侧没有反应」）：
 			 *

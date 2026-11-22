@@ -1,13 +1,38 @@
 package qrlogin
 
-// HTTP 辅助：全部走 Transport 抽象（默认 net/http，wasm 里换成 Host API）。
-
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// HTTP 辅助：全部走 Transport 抽象（默认 net/http，wasm 里换成 Host API）。
+
+// parsePassportJSON 解析 passport 响应体，**JSON number 一律保留为 json.Number**。
+//
+// # 为什么必须 UseNumber（2026-11-22，扫码 invalid signature 的最终根因）
+//
+// passport 的 `nonce` 是 19 位整数（例：6019617419463721984）。默认的
+// json.Unmarshal 会把它解成 float64 —— 而 float64 只有 53 位尾数，**存不下**：
+//
+//	float64(6019617419463721984) → 6019617419463722000   （差了 16）
+//	fmt.Sprint(...)              → "6.019617419463722e+18"
+//
+// clientSign = base64(sha1("nonce=" + nonce + "&" + ssecurity))：
+// nonce 只要差 1 位，签名就完全错，服务端不下发有效 serviceToken，
+// 米家 RC4 接口于是回 `{"code":0,"message":"invalid signature"}`。
+// `code=0` 让它看起来像成功，文案又把人引向"签名算法错了"，极难自查。
+//
+// 用 UseNumber 后 nonce 解成字符串原样保留，strOf 直接返回，精度零损失。
+func parsePassportJSON(body []byte, out any) error {
+	raw := passportStrip(body)
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return dec.Decode(out)
+}
 
 // respHeaders 规范化响应头：net/http 版已带；Host API 版把 Set-Cookie 逐行放进
 // Headers["Set-Cookie"]（多值用 \n 分隔）——cookie 收集器按行解析。

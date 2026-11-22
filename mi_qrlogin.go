@@ -410,7 +410,11 @@ func (r *qrRuntime) serviceLoginWithPassToken(ctx *plugin.Context, sid, deviceID
 	}
 	raw := strings.TrimSpace(strings.ReplaceAll(string(body), "&&&START&&&", ""))
 	var d map[string]any
-	if json.Unmarshal([]byte(raw), &d) != nil {
+	// UseNumber：passport 的 nonce 是 19 位整数，float64 存不下（53 位尾数），
+	// 一旦被浮点化就会给 clientSign 喂错值 ⇒ invalid signature。见 qrlogin/http.go 注释。
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	if dec.Decode(&d) != nil {
 		return sess, "", "", "", fmt.Errorf("serviceLogin 返回异常: %.120s", raw)
 	}
 	if code := qrInt(d["code"]); code != 0 {
@@ -702,6 +706,15 @@ func qrInt(v any) int {
 		return int(x)
 	case int:
 		return x
+	case int64:
+		return int(x)
+	case json.Number:
+		// UseNumber 之后 code 是 json.Number；漏这一支会让 `{"code":1}`
+		// 被当成 0（成功），直接把"未扫码"误判成"扫码通过"。
+		if n, e := x.Int64(); e == nil {
+			return int(n)
+		}
+		return 0
 	case string:
 		var n int
 		fmt.Sscanf(x, "%d", &n)

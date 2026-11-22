@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -171,14 +172,46 @@ func passportStrip(b []byte) []byte {
 	return []byte(strings.TrimSpace(strings.ReplaceAll(string(b), "&&&START&&&", "")))
 }
 
+// strOf 把 JSON 解出来的值转字符串。
+//
+// # ⚠ 数字绝不能走 fmt.Sprint（2026-11-22，扫码 invalid signature 的根因）
+//
+// encoding/json 把 JSON number 解成 float64，而 fmt.Sprint(float64) 用最短表示，
+// **大整数会被写成科学计数法**：
+//
+//	fmt.Sprint(float64(6019617419463721984))  →  "6.019617419463722e+18"
+//
+// 小米 passport 的 `nonce` 就是这种 19 位整数，而 clientSign 的定义是
+//
+//	base64(sha1("nonce=" + nonce + "&" + ssecurity))
+//
+// nonce 一旦变成 "6.019617419463722e+18"，签名必然算错 —— 服务端就不会下发
+// 有效的 serviceToken，米家 RC4 接口回 `{"code":0,"message":"invalid signature"}`。
+//
+// 这个错误极难自查：`code=0` 看起来像成功，错误文案又把人引向"签名算法错了"。
+// 实测特征（服务器直连小米）：同一请求下 fmt.Sprint 打印的 nonce 带 `e+18`，
+// 而正确值应是纯数字串。
 func strOf(v any) string {
-	if v == nil {
+	switch x := v.(type) {
+	case nil:
 		return ""
+	case string:
+		return x
+	case float64:
+		// 'f' = 定点，-1 = 最短必要位数：绝不出现 e+18 这类指数形式。
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(x), 'f', -1, 32)
+	case json.Number:
+		return x.String()
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprint(v)
 	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fmt.Sprint(v)
 }
 
 func intOf(v any) int {
@@ -187,6 +220,15 @@ func intOf(v any) int {
 		return int(x)
 	case int:
 		return x
+	case int64:
+		return int(x)
+	case json.Number:
+		// UseNumber 之后 code 是 json.Number；漏这一支会把 `{"code":1}`
+		// 当成 0（成功），把"未扫码"误判成"扫码通过"。
+		if n, e := x.Int64(); e == nil {
+			return int(n)
+		}
+		return 0
 	case string:
 		var n int
 		fmt.Sscanf(x, "%d", &n)

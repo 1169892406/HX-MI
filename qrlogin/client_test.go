@@ -368,3 +368,40 @@ func TestTokenLikeBody(t *testing.T) {
 		t.Error("裸 token 被误拒")
 	}
 }
+
+// TestStrOfNumberNotScientific 钉住扫码 invalid signature 的根因。
+//
+// passport 的 nonce 是 19 位整数（6019617419463721984）。默认 json.Unmarshal
+// 解成 float64 会**损失精度**（53 位尾数存不下 63 位），fmt.Sprint 又写成
+// "6.019617419463722e+18"。clientSign = base64(sha1("nonce="+nonce+"&"+ssecurity))，
+// nonce 差一位签名就全错 ⇒ 服务端不下发有效 serviceToken ⇒ 米家 RC4 回
+// {"code":0,"message":"invalid signature"}（code=0 极具误导性）。
+//
+// 所以真实验证必须**走 JSON 解析**：直接构造 float64 时精度早就丢了。
+func TestStrOfNumberNotScientific(t *testing.T) {
+	// ① 真实场景：19 位 nonce 经 parsePassportJSON 后必须原样保留
+	var out map[string]any
+	if err := parsePassportJSON([]byte(`{"nonce":6019617419463721984,"ssecurity":"abc=="}`), &out); err != nil {
+		t.Fatalf("parsePassportJSON: %v", err)
+	}
+	nonce := strOf(out["nonce"])
+	if nonce != "6019617419463721984" {
+		t.Fatalf("nonce = %q（期望 6019617419463721984）：浮点化会丢精度 ⇒ invalid signature", nonce)
+	}
+	if strings.ContainsAny(nonce, "eE+") {
+		t.Fatalf("nonce 被写成指数形式（%q）", nonce)
+	}
+	// ② ssecurity 原样
+	if got := strOf(out["ssecurity"]); got != "abc==" {
+		t.Errorf("ssecurity = %q", got)
+	}
+	// ③ 字符串/nil/小整数照旧
+	for _, c := range []struct {
+		in   any
+		want string
+	}{{"6019617419463721984", "6019617419463721984"}, {nil, ""}, {float64(319), "319"}} {
+		if got := strOf(c.in); got != c.want {
+			t.Errorf("strOf(%v) = %q（期望 %q）", c.in, got, c.want)
+		}
+	}
+}
