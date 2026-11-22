@@ -250,22 +250,39 @@ func (r *qrRuntime) exchange(out map[string]any) (string, error) {
 	s.HostSessionID = sess
 
 	/*
-	 * 换票按**服务域**逐个试（2026-11-22 用户手机截图 70036 之后的定案）：
+	 * 换票顺序（2026-11-22 定稿）：
 	 *
-	 *   ① passToken → xiaomiio：MIoT 云（api.io.mi.com RC4 探针 / 设备同步）要的就是
-	 *      这个域的 serviceToken，所以它是**主路径**；
-	 *   ② passToken → micoapi：与 console 完全一致的域，主路径不通时的等价退路；
-	 *   ③ lp 直接给的 (location, ssecurity)：扫码会话自己的票据，最后再试一次。
+	 *   ① **扫码票据直接换**：lp 成功返回的 (location, ssecurity) 就是本次扫码
+	 *      的凭据，最直接、最不可能被 passport 拒。sid=xiaomiio 时它指向
+	 *      `https://sts.api.io.mi.com/sts?...`（服务器实测）。
+	 *   ② passToken → xiaomiio：①不通时的等价退路（MIoT 域）。
+	 *   ③ passToken → micoapi：再退一层（小爱域；只在 ①②都失败时用）。
 	 *
-	 * 每次都用**新生成的 deviceId**（console 的做法：tok["deviceId"]=randomHex(16)）。
-	 * 沿用扫码那台的 id 会让 passport 把"新设备 + 老 passToken"判成异常。
+	 * 为什么把 ① 提到最前：之前 passToken 优先，而扫码刚拿到的 passToken 在
+	 * passport 那边可能还没"生效"（实测 `serviceLogin 响应缺少
+	 * location/nonce/ssecurity`）。而 ① 用的 location/ssecurity 是同一个响应
+	 * 里配对的，不存在时序问题。
 	 */
 	var errs []string
-	bindAccount := func(uid, pt, dev string) {
-		r.finish(uid, pt, dev)
+
+	// ① 扫码票据直接换（host 必须可信，否则记下原因继续）
+	if loc != "" && nonce != "" && ssec != "" {
+		s.State = "failed"
+		if _, err := exchangeAndProbe(ctx, sess, s, withClientSign(loc, nonce, ssec), ssec, passToken); err == nil {
+			r.finish(userID, passToken, deviceID)
+			return userID, nil
+		} else {
+			host := ""
+			if u, ue := url.Parse(loc); ue == nil {
+				host = u.Hostname()
+			}
+			errs = append(errs, fmt.Sprintf("扫码票据换票（host=%s）：%v", host, err))
+		}
+	} else {
+		errs = append(errs, "扫码结果缺少 location/nonce/ssecurity")
 	}
 
-	s.State = "failed"
+	// ②③ passToken 免密重取（每次用新 deviceId；console 也是这个做法）
 	for _, sid := range []string{"xiaomiio", "micoapi"} {
 		if passToken == "" {
 			errs = append(errs, "passToken 缺失，跳过 "+sid)
@@ -277,26 +294,12 @@ func (r *qrRuntime) exchange(out map[string]any) (string, error) {
 			errs = append(errs, fmt.Sprintf("%s 取票：%v", sid, ferr))
 			continue
 		}
-		if _, e2 := exchangeAndProbe(ctx, sess, s, loc2, ssec2, pt2); e2 == nil {
-			bindAccount(userID, pt2, freshID)
-			return userID, nil
-		} else {
-			errs = append(errs, fmt.Sprintf("%s 换票：%v", sid, e2))
-		}
-	}
-
-	// ③ 扫码会话自己给的票据（clientSign 回调）
-	if loc != "" && nonce != "" && ssec != "" {
 		s.State = "failed"
-		if _, e3 := exchangeAndProbe(ctx, sess, s, withClientSign(loc, nonce, ssec), ssec, passToken); e3 == nil {
-			bindAccount(userID, passToken, deviceID)
+		if _, err := exchangeAndProbe(ctx, sess, s, loc2, ssec2, pt2); err == nil {
+			r.finish(userID, pt2, freshID)
 			return userID, nil
 		} else {
-			host := ""
-			if u, ue := url.Parse(loc); ue == nil {
-				host = u.Hostname()
-			}
-			errs = append(errs, fmt.Sprintf("扫码票据换票（host=%s）：%v", host, e3))
+			errs = append(errs, fmt.Sprintf("%s 换票：%v", sid, err))
 		}
 	}
 
@@ -360,7 +363,15 @@ func (r *qrRuntime) serviceLoginWithPassToken(ctx *plugin.Context, sess, sid, de
 	nonce := qrStr(d["nonce"])
 	ssec := qrStr(d["ssecurity"])
 	if loc == "" || nonce == "" || ssec == "" {
-		return "", "", "", fmt.Errorf("serviceLogin 响应缺少 location/nonce/ssecurity")
+		// 把**实际拿到了什么**写进错误：只有"缺少 xxx"无法判断是 passport 的
+		// 语义变化，还是我们请求参数不对（2026-11-22 排障吃过这个亏）。
+		keys := make([]string, 0, len(d))
+		for k := range d {
+			keys = append(keys, k)
+		}
+		return "", "", "", fmt.Errorf(
+			"serviceLogin 响应缺少 location/nonce/ssecurity（code=%d desc=%q 有location=%v 有nonce=%v 有ssecurity=%v 字段=%v）",
+			qrInt(d["code"]), qrStr(d["description"]), loc != "", nonce != "", ssec != "", keys)
 	}
 	if pt := qrStr(d["passToken"]); pt != "" {
 		passToken = pt // 服务端轮换时采用新值
@@ -437,18 +448,27 @@ func qrClientFor(ctx *plugin.Context) *qrlogin.Client {
 			 */
 			TokenPath: ".mi.token",
 			/*
-			 * ★★ 2026-11-22（用户手机截图：小米 App 里直接显示
-			 * 「系统错误，请稍候再试:70036」）：
+			 * ★★ 2026-11-22（第三次定位，由错误文案 host=api2.mina.mi.com 反推出来）：
 			 *
-			 * 这条错误是**小米 App 侧**弹的，不是我们的代码抛的 —— 说明"确认登录"
-			 * 这一步就被对方拒了，问题在二维码/服务域，而不在换票。对照
-			 * /deepseek-work/xiaoai-speaker-console（同机、同 App、实测正常）：
-			 * 它扫码用的是 **sid=micoapi**。
+			 * 扫码服务域必须是 **xiaomiio**（MIoT），不能用 micoapi。
 			 *
-			 * 结论：**扫码阶段用 micoapi**；xiaomiio（MIoT 云要用的域）在拿到
-			 * passToken 之后再用免密 serviceLogin 单独换（见 exchange）。
+			 * 中间一度改成 micoapi 是因为手机 App 报 70036 —— 但那个 70036 的真因是
+			 * **长轮询协程在 wasm 里不推进**（票无人等待），与 sid 无关。抄
+			 * /deepseek-work/xiaoai-speaker-console 的 micoapi 恰恰是错的：那是**小爱
+			 * 音箱**项目，它的凭据本来就该落到 `api2.mina.mi.com`（小爱的域）。
+			 *
+			 * 用 micoapi 扫码的实际后果（用户实测错误文案）：
+			 *   `扫码票据换票（host=api2.mina.mi.com）：STS 地址不在可信范围`
+			 *   —— 拿到的 location 指向小爱登录服务，而我们要的是 MIoT 的
+			 *   serviceToken（api.io.mi.com RC4 探针 / 设备同步都用它）。
+			 *   同时 micoapi 的 passToken 拿去换 xiaomiio 也不给 location
+			 *   （`serviceLogin 响应缺少 location/nonce/ssecurity`）。
+			 *
+			 * 用 xiaomiio 扫码时，lp 成功返回的 location 直接就是
+			 * `https://sts.api.io.mi.com/sts?...`（服务器实测过），
+			 * 换票一步到位，不需要 passToken 兜底。
 			 */
-			Sid:             "micoapi",
+			Sid:             "xiaomiio",
 			LongPollTimeout: 25 * time.Second,
 			Logger:          nil,
 			Exchange:        qrRT.exchange,
