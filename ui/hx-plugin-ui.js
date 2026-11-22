@@ -82,6 +82,63 @@
     return h;
   }
 
+  /**
+   * 自适应布局（2026-11-23 用户：「所有上下页面以及右侧滑动自适应，统一 UI 风格」）。
+   *
+   * ## 它解决什么
+   *
+   * 插件页跑在 iframe 里，宿主给的是**整块可用宽度**。各插件自己写 `.wrap
+   * { max-width: 880px; margin: 0 auto }` 之类的上限，于是宽屏下内容缩在中间
+   * 一条、右侧大片空白 —— 用户在 HXCS、HX-MI 上都报过这个问题。
+   *
+   * 平台侧的口径（已统一）：`width:100%; max-width:1920px`，超宽屏才居中。
+   * 插件要跟它一致，就不能再写自己的 max-width。
+   *
+   * ## 两件事
+   *
+   *   ① **横向**：把页面根容器从"固定/居中宽度"改成"撑满可用宽度"，
+   *      `box-sizing: border-box` 保证 padding 不撑出横向滚动条；
+   *   ② **纵向**：滚动**全部交给平台页**（`scrollbar:'host'` 时插件文档
+   *      `overflow-y: hidden`），插件内不造第二个滚动容器 —— 否则会出现
+   *      "页面里还有一条内滚动条"，用户明确反对过（双层滚动条）。
+   *
+   * ## 边界（不砍功能）
+   *
+   * 只调整**根容器**的宽度与滚动归属；表格、列表这些本来就需要横向滚动的
+   * 区域（`overflow-x:auto`）保持原样 —— 把它们的 overflow 关掉会把内容
+   * 裁掉，那是"改 UI 砍功能"，用户明令禁止。
+   */
+  function applyAdaptive(root) {
+    if (!root || !root.style) return;
+    try {
+      // ① 横向撑满：清掉插件自己写的居中上限
+      root.style.maxWidth = 'none';
+      root.style.width = '100%';
+      root.style.marginLeft = '0';
+      root.style.marginRight = '0';
+      root.style.boxSizing = 'border-box';
+      /*
+       * ⚠ 这里**不能**碰 overflowY（2026-11-23 实测踩到）。
+       *
+       * 写成 `root.style.overflowY = 'visible'` 会覆盖 applyHostScrollbar() 刚设好
+       * 的 hidden（当 root 就是 body 时尤其致命），结果宿主"滚动归我"的接管控不住
+       * 插件文档 —— 实测 getComputedStyle(document.body).overflowY 从 hidden 变回
+       * visible，又出现内层滚动条。
+       * 纵向归 applyHostScrollbar 一家管，这里只做横向。
+       */
+    } catch (e) {}
+  }
+
+  /** 找页面根容器：优先 .wrap / #app / main，都没有就 body。 */
+  function findRoot() {
+    var cands = ['.wrap', '#app', 'main', '.container', '.page'];
+    for (var i = 0; i < cands.length; i++) {
+      var n = document.querySelector(cands[i]);
+      if (n) return n;
+    }
+    return document.body;
+  }
+
   function start(opts) {
     opts = opts || {};
     var rpc = typeof opts.rpc === 'function' ? opts.rpc : null;
@@ -158,6 +215,11 @@
       }
       if (frame.scrollbar === 'host') applyHostScrollbar();
       /*
+       * 自适应布局跟随宿主声明（2026-11-23）：宿主说滚动归它，就同时把根容器
+       * 撑满可用宽度 —— 两件事是一体的（"上下一条滚动条 + 右侧用满"）。
+       */
+      if (frame.scrollbar === 'host') applyAdaptive(findRoot());
+      /*
        * host_back：宿主工具条已带「返回」，插件内那颗同名按钮要隐藏
        * （2026-11-22 用户截图：两颗按钮上下堆在右上角）。
        * 只隐藏"返回"这一个入口，不碰插件的其它按钮。
@@ -174,8 +236,20 @@
     } else {
       global.addEventListener('resize', schedule);
     }
-    global.addEventListener('load', schedule);
-    schedule();                          // 首屏先报一次
+    global.addEventListener('load', function () {
+      if (hostScrollbar) applyAdaptive(findRoot());
+      schedule();
+    });
+    // 首屏先做一次自适应 + 上报（等 DOM 就绪再量，避免量到一半的布局）
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () {
+        if (hostScrollbar) applyAdaptive(findRoot());
+        schedule();
+      });
+    } else {
+      if (hostScrollbar) applyAdaptive(findRoot());
+      schedule();
+    }
 
     return {
       /** 立刻重算并上报（插件自己知道内容变了时可直接调）。 */
@@ -186,6 +260,8 @@
       get hostScrollbar() { return hostScrollbar; },
       /** 当前生效的高度区间（排障用）。 */
       get range() { return { min: min, max: max }; },
+      /** 手动应用自适应布局（插件自己知道内容变了、或想立刻套用时可调）。 */
+      adapt: function () { applyAdaptive(findRoot()); },
       stop: function () {
         stopped = true;
         if (timer) clearTimeout(timer);

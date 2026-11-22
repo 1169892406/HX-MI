@@ -76,7 +76,20 @@ body {
  * 去掉写死的 max-width，页面随宿主 iframe 撑满；窄容器下本就等于 100%，
  * 内部（表格/两栏网格/媒体查询）各自处理挤压，不需要外层上限。
  */
-.wrap { max-width: none; margin: 0 auto; padding: 18px 24px 56px; }
+/*
+ * 2026-11-23（用户「所有上下页面以及右侧滑动自适应，统一 UI 风格」）：
+ * 撑满可用宽度，`box-sizing: border-box` 保证左右 padding 不撑出横向滚动条。
+ * 超宽屏由**平台**那一层统一约束（`.page > *` 的 width:100%/max-width:1920px），
+ * 插件不再自带居中上限 —— 否则宽屏下缩成中间一条、右侧一片空白。
+ * 纵向滚动仍全部归平台页（scrollbar:'host'），这里不造内层滚动容器。
+ */
+.wrap {
+  max-width: none;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 18px 24px 56px;
+}
 .spacer { flex: 1 1 auto; min-width: 8px; }
 .muted { color: var(--muted); }
 .small { font-size: 12.5px; }

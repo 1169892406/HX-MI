@@ -218,6 +218,13 @@
     // 主题下发：插件页是 opaque origin，读不到父窗口的 document.theme；
     // 只能由宿主在消息里告诉它。收到就切 data-theme，未收到时由 CSS 兜底。
     if (m.type === 'theme' && typeof m.theme === 'string') {
+      /*
+       * ★ 宿主声明（scrollbar/height_range/host_back）必须在**任何**时刻接住
+       * （2026-11-23 实测踩到）：主题帧可能早于 host-ready 到达，那时 uiKit 还没
+       * 创建，`if (uiKit)` 静默跳过 ⇒ 滚动条归属/自适应全部没生效。
+       * 这里先按需创建，再投递。
+       */
+      startHeightReporting();
       if (uiKit) uiKit.acceptHostFrame(m);
       applyTheme(m.theme);
       return;
@@ -2333,18 +2340,24 @@
         if (d && d.message) setQrState(d.message);
         else if (st === 'waiting') setQrState('等待扫码…');
         /*
-         * 8 秒（2026-11-23 从 2 秒上调）。插件侧单次 qr_status 会做一次 1.2 秒长轮询，
-         * 而 wasm 是单线程 —— 轮询间隔太密会让「扫码等待」把其它调用（刷新账号、
-         * 设备详情）挤到 30 秒上限被杀，症状是 PLUGIN_SANDBOX_CRASH。
-         * 服务器实测：1.2s 超时 + 8s 间隔连问 8 次，0 次被小米 403。
-         * 代价：扫码确认后最多 8 秒才在页面上显示成功 —— 换来整页不再被拖垮。
+         * ★ 串行轮询（2026-11-23 定稿）：**拿到响应后**才排下一次，间隔 300ms。
+         *
+         * 为什么不是固定间隔（原来 2s / 8s 都试过）：
+         * 插件侧单次 qr_status 会做一次 **20 秒**长轮询（结果只在连接活着时送达，
+         * 短轮询收不到扫码结果——alpha.197 就是因此改坏）。如果前端按固定间隔
+         * 发，20 秒没返回时已经又发了 7~9 个，它们在单线程 wasm 里排队，每个都要
+         * 等前面跑完，总耗时必然顶穿平台 30 秒上限 ⇒
+         *   PLUGIN_SANDBOX_CRASH: module closed with context deadline exceeded。
+         *
+         * 串行就彻底没有这个问题：上一次没返回就绝不会发下一次，队列里最多 1 个。
+         * 300ms 的间隔只为避免"返回即刻发"把刚空出的槽瞬间占满。
          */
-        qrTimer = setTimeout(function () { pollQr(seq); }, 8000);
+        qrTimer = setTimeout(function () { pollQr(seq); }, 300);
       })
       .catch(function (e) {
         if (seq !== qrSeq) return;
         setQrState('轮询失败：' + errText(e), 'err');
-        qrTimer = setTimeout(function () { pollQr(seq); }, 3000);
+        qrTimer = setTimeout(function () { pollQr(seq); }, 1000);
       });
   }
 
