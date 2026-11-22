@@ -197,3 +197,65 @@ func TestQRTokenKeyIsShared(t *testing.T) {
 		t.Fatalf("TokenPath = %q（期望 .mi.token；带 qrlogin/ 前缀会与 runtime 前缀叠加）", got)
 	}
 }
+
+// TestQRStatusDrivesLongPoll 钉住 70036 的根因修复：等待期内的长轮询必须由
+// **每次 qr_status 调用**驱动。
+//
+// 背景（2026-11-22）：qrlogin.Client 原先在 Start 里 `go c.wait(...)` 起后台协程。
+// wasm c-shared 的 Go 运行时在导出函数返回后没有调度器，协程不推进 —— 那张票
+// 从来没人等，手机点「确认登录」时小米回 70036「系统错误，请稍后再试」。
+// 现场证据：前端每 2 秒调 qr_status，每次只花 3ms（真在长轮询不可能这么快）。
+//
+// 这条断言的作用：一旦有人把 Poll 去掉（"看起来多余"），这里立刻变红。
+func TestQRStatusDrivesLongPoll(t *testing.T) {
+	h := hosttest.New(t)
+	// 每个用例独立会话：全局 qrClient 跨用例复用，必须清空
+	qrMu.Lock()
+	qrClient = nil
+	qrRT = nil
+	qrMu.Unlock()
+	h.Fixture(plugin.OpStorageGet, map[string]any{"found": false})
+	h.Fixture(plugin.OpStoragePut, map[string]any{"ok": true})
+	h.On(plugin.OpHTTPOpen, func(json.RawMessage) (any, error) {
+		return map[string]any{"session_id": "sess-qr-poll"}, nil
+	})
+	lpCalls := 0
+	h.On(plugin.OpHTTPSessionRequest, func(raw json.RawMessage) (any, error) {
+		var req struct {
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		switch {
+		case strings.Contains(req.URL, "/serviceLogin"):
+			return qrSessionBody(map[string]any{
+				"location": "https://account.xiaomi.com/fe/service/login?sid=micoapi",
+			}), nil
+		case strings.Contains(req.URL, "/longPolling/loginUrl"):
+			return qrSessionBody(map[string]any{
+				"loginUrl": "https://account.xiaomi.com/qr/login?ticket=lp_POLL",
+				"lp":       "https://lp.account.xiaomi.com/lp/s?k=lp_POLL",
+				"timeout":  240,
+			}), nil
+		default:
+			lpCalls++
+			return qrSessionBody(map[string]any{"code": 1, "description": "waiting"}), nil
+		}
+	})
+	h.On(plugin.OpHTTPRequest, func(json.RawMessage) (any, error) {
+		t.Error("扫码流程不应使用裸 http.request")
+		return nil, nil
+	})
+
+	ctx := &plugin.Context{PluginID: "homex.xiaomi_miot", HouseholdID: "hh"}
+	if _, err := qrStartTool(ctx, json.RawMessage("{}")); err != nil {
+		t.Fatalf("qrStartTool: %v", err)
+	}
+	before := lpCalls
+	if _, err := qrStatusTool(ctx, json.RawMessage("{}")); err != nil {
+		t.Fatalf("qrStatusTool: %v", err)
+	}
+	if lpCalls <= before {
+		t.Fatal("qr_status 没有发起长轮询：wasm 里没有后台协程，票会无人等待 ⇒ 手机端 70036")
+	}
+}

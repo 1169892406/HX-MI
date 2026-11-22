@@ -488,8 +488,20 @@ func qrStartTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, er
 }
 
 // qrStatusTool 轮询扫码状态（前端 1~2 秒一次）。
+//
+// ★ 2026-11-22（70036 真因）：这里必须**顺手做一次长轮询**。
+//
+// qrlogin.Client 原本在 Start 里 `go c.wait(...)` 起后台协程等扫码。wasm
+// c-shared 的 Go 运行时在导出函数返回后没有调度器，协程不会推进 —— 那张票
+// 从来没人等，手机点「确认登录」时小米认为没有有效等待方，回
+// `70036 系统错误，请稍候再试`。实测证据：qr_status 每次只花 3ms。
+//
+// 前端本来就在 2 秒轮一次，于是让它成为驱动源：每次调用做一次**有界**轮询
+// （2.2s，落在平台 3000ms 执行预算内；服务端 hold 到有结果或自己超时，超时
+// 就当"还没扫"继续下一次）。拿到 code=0 后照常走换票 + 账号登记。
 func qrStatusTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
 	c := qrClientFor(ctx)
+	c.Poll(2200 * time.Millisecond)
 	st := c.Status()
 	out := map[string]any{
 		"ok":         true,

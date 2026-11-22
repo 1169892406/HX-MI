@@ -57,6 +57,9 @@ type Client struct {
 	state    string
 	message  string
 	loginURL string
+	/* 长轮询地址与请求头（Poll 用；wait 也用同一份） */
+	lpURL     string
+	lpHeaders map[string]string
 	deadline time.Time
 	userID   string
 	waitStop chan struct{}
@@ -191,6 +194,29 @@ func (c *Client) Start() (Status, error) {
 	c.waiting = true
 	c.mu.Unlock()
 
+	/*
+	 * ★★ 2026-11-22（扫码一直 70036 的真因）：
+	 *
+	 * `go c.wait(...)` 在 **wasm 里跑不起来**。wasm c-shared 的 Go 运行时在
+	 * 导出函数返回后就没有调度器了 —— 协程不会推进，宿主调用之间没有任何
+	 * CPU 时间片。实测证据：前端每 2 秒调一次 qr_status，每次只花 **3ms**
+	 * （如果长轮询真的在跑，至少会占住几十毫秒到 25 秒）。
+	 *
+	 * 于是那张票**从来没人轮询**：手机上点「确认登录」时，小米服务端认为
+	 * 这个 ticket 没有有效等待方（lp 连接不存在），直接回
+	 * `70036 系统错误，请稍候再试`。console 是原生进程、调度器常驻，所以它正常。
+	 *
+	 * 解法不是"修协程"，而是换驱动源：把长轮询改成**每次 qr_status 调用做一次
+	 * 有界轮询**（见 Poll），由前端既有的 2 秒轮询驱动。这样完全不需要
+	 * 后台协程，也不依赖执行预算之外的任何东西。
+	 *
+	 * 原生进程（console）仍可走协程：Poll 是幂等补充，二者不会重复处理
+	 * （pollOnce 有状态锁，拿到结果就转 ok/error，等待循环随即退出）。
+	 */
+	c.mu.Lock()
+	c.lpURL = strOf(data["lp"])
+	c.lpHeaders = map[string]string{"User-Agent": randomUA()}
+	c.mu.Unlock()
 	go c.wait(data, stop)
 	c.logf("已生成登录二维码，有效期 %.0fs", time.Until(c.deadline).Seconds())
 	return st, nil
@@ -201,6 +227,57 @@ func (c *Client) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.statusLocked()
+}
+
+// Poll 由**外部调用**驱动一次有界长轮询（2026-11-22，wasm 沙箱专用路径）。
+//
+// # 为什么需要它
+//
+// wasm c-shared 的 Go 运行时在导出函数返回后就没有调度器：`go c.wait(...)`
+// 起的长轮询协程**不会推进**。结果那张 ticket 从来没人等，手机点确认登录时
+// 小米回 70036（"系统错误，请稍后再试"，其实是没有有效等待方）。
+// 实测证据：前端每 2 秒调一次 qr_status，每次只花 3ms。
+//
+// 既然"后台推进"在沙箱里不成立，就把驱动权交给宿主：前端本来就在轮询
+// qr_status，那就让 qr_status 顺手做一次**有界**长轮询（timeout 由调用方给，
+// 必须落在插件执行预算内）。
+//
+// 幂等性：拿到 code=0 结果就转 ok/error 并清掉 waiting，后续 Poll 直接返回当前
+// 状态；原生进程里 wait 协程与 Poll 并存也安全（谁先拿到结果谁收尾，另一个
+// 看到 state != waiting 就退出）。
+func (c *Client) Poll(timeout time.Duration) {
+	c.mu.Lock()
+	if c.state != "waiting" || c.lpURL == "" {
+		c.mu.Unlock()
+		return
+	}
+	lpURL := c.lpURL
+	headers := c.lpHeaders
+	deadline := c.deadline
+	c.mu.Unlock()
+
+	if !time.Now().Before(deadline) {
+		c.fail("二维码已过期，请重新获取")
+		return
+	}
+	if headers == nil {
+		headers = map[string]string{"User-Agent": randomUA()}
+	}
+	resp, err := c.trDo(lpURL, headers, timeout)
+	if err != nil {
+		// 超时/网络错误不算失败：手机还没扫，下一次调用继续
+		return
+	}
+	out := map[string]any{}
+	if json.Unmarshal(passportStrip(resp.Body), &out) != nil {
+		return
+	}
+	if code := intOf(out["code"]); code != 0 {
+		// 服务端"还没扫"也走这里（非 0 code），继续等
+		return
+	}
+	c.logf("扫码通过（Poll 驱动，字段：%s）", keysOf(out))
+	c.handleScanResult(out, headers, nil)
 }
 
 // Cancel 取消等待中的扫码。
