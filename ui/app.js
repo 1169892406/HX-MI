@@ -73,10 +73,16 @@
   /* 局域网检查页当前选中的设备（did） */
   var healthSelDid = '';
   /* 预热状态：每台只尝试一次，整页只跑一轮（2026-11-21，防止重渲染导致递归请求） */
-  var prefetchTried = {};
+  /* 预热已移除（2026-11-22）：列表级并发请求会把单线程 wasm 压进 30s 上限。 */
   /* 过期缓存的"最近一次后台刷新"时间戳（按 did）：防止失败后无限重试（见 loadDeviceDetail） */
   var staleRefreshAt = {};
-  var prefetchDone = false;
+  /* 详情请求单飞（2026-11-22）：同一时刻只允许一个 device_detail 在飞，
+     排队的那台存在 detailQueued（见 loadDeviceDetail / finishDetailRequest）。
+     必须在这里声明：这里少一行，严格模式下第一次赋值就 ReferenceError，
+     整个详情区会静默变空（实测过一次，别删）。 */
+  var detailInFlight = false;
+  var detailQueued = null;
+
   /*
    * 详情缓存落 localStorage（2026-11-21 用户：「每次点进来会等待一会，设备在线应该立刻出来」）。
    *
@@ -1457,28 +1463,19 @@
       listBox.appendChild(p);
     } else {
       /*
-       * 预热（2026-11-21「每次点进来要等」）：列表一渲染完就按顺序把**还没缓存**的
-       * 设备详情取一遍。用户点哪台，大概率已经取好了。
-       * 限 4 台且串行：wasm 单线程，并发请求只会互相排队，还会把宿主塞满。
+       * 列表级预热已移除（2026-11-22 实测事故）。
+       *
+       * 上一版在列表渲染后按顺序把 4 台未缓存设备的详情各取一次。wasm 是**单线程**：
+       * 这些请求会和用户在页面上触发的 accounts / account / health_list 一起排队，
+       * 队列总时长超过宿主 30s 上限后实例被杀 —— 用户看到的是
+       *   「读取失败：PLUGIN_SANDBOX_CRASH: 沙箱实例已不可用（…）：需重新加载」
+       * （实测：health_list 8159ms + accounts 8156ms + 5×device_detail 叠加）。
+       *
+       * 现在只保留两件更便宜也更有效的事：
+       *   ① 详情缓存落 localStorage（重开页面也命中，**点开就是缓存值**）；
+       *   ② 缓存过期时后台刷一次（60s 限频，见 loadDeviceDetail）。
+       * 首次点某台设备仍要读一次，这是真实成本；不拿"后台偷偷跑 4 台"换它。
        */
-      (function prefetchDetails() {
-        if (prefetchDone) return;   // 一个页面只预热一轮，避免每次重渲染都重入
-        var queue = list.filter(function (x) {
-          return x && x.did && !devDetailCache[x.did] && !prefetchTried[x.did];
-        }).slice(0, 4);
-        if (!queue.length) return;
-        prefetchDone = queue.length > 0;
-        var i = 0;
-        (function step() {
-          if (i >= queue.length) return;
-          var d0 = queue[i++];
-          if (!devDetailCache[d0.did] && !devDetailPending[d0.did]) {
-            prefetchTried[d0.did] = true;
-            loadDeviceDetail(d0, { force: true, background: true });
-          }
-          setTimeout(step, 900);   // 固定节拍：wasm 单线程，串行比并发快
-        })();
-      })();
 
       var selOk = false;
       list.forEach(function (d) { if (d.did === devSelDid) selOk = true; });
@@ -1612,6 +1609,16 @@
       return;
     }
     if (devDetailPending[key]) return;
+    /*
+     * 全局单飞（2026-11-22）：同一时刻只允许一个详情请求在飞。
+     * 多台同时点/后台刷新叠加时会排队，而 wasm 单线程的排队时间会记在
+     * 后一个调用自己的预算里 —— 叠多了就把实例送进 30s 上限。
+     */
+    if (detailInFlight) {
+      detailQueued = d;
+      return;
+    }
+    detailInFlight = true;
     devDetailPending[key] = true;
     rpc('plugin.tool.call', { tool: 'device_detail', args: { did: d.did, name: d.name } })
       .then(function (res) {
@@ -1624,12 +1631,14 @@
         }
         repaintDetailIfCurrent(d);
         scheduleHeight();
+        finishDetailRequest();
       })
       .catch(function (e) {
         delete devDetailPending[key];
         if (!cached) devDetailCache[key] = { error: errText(e) };
         repaintDetailIfCurrent(d);
         scheduleHeight();
+        finishDetailRequest();
       });
   }
 
@@ -2001,6 +2010,20 @@
       grid.appendChild(card);
     });
     pane.appendChild(grid);
+  }
+
+  /**
+   * 一个详情请求结束：清单飞标志，若有排队的那台就接着取。
+   *
+   * 60ms 让出一拍：宿主侧同一次用户操作常带 2~3 个调用，紧接着发下一条会把
+   * "刚刚空出来的槽"立刻占满，等于没有节流。
+   */
+  function finishDetailRequest() {
+    detailInFlight = false;
+    var nextDev = detailQueued;
+    detailQueued = null;
+    if (!nextDev) return;
+    setTimeout(function () { loadDeviceDetail(nextDev); }, 60);
   }
 
   /**
