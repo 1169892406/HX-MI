@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -291,7 +292,11 @@ func (r *qrRuntime) exchange(out map[string]any) (string, error) {
 			bindAccount(userID, passToken, deviceID)
 			return userID, nil
 		} else {
-			errs = append(errs, "扫码票据换票："+e3.Error())
+			host := ""
+			if u, ue := url.Parse(loc); ue == nil {
+				host = u.Hostname()
+			}
+			errs = append(errs, fmt.Sprintf("扫码票据换票（host=%s）：%v", host, e3))
 		}
 	}
 
@@ -575,14 +580,43 @@ func qrSVGTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, erro
 
 // ---------- 小工具 ----------
 
+// qrStr 把 JSON 解出来的值转成字符串（**数字不能走 fmt.Sprint**）。
+//
+// # 为什么必须特判 float64（2026-11-22 实测，扫码一直 70016 的最终根因）
+//
+// `encoding/json` 把 JSON number 解成 `float64`，而 `fmt.Sprint(float64)` 用
+// 最短表示 —— **大整数会被写成科学计数法**：
+//
+//	fmt.Sprint(float64(146294077))  →  "1.46294077e+08"
+//	fmt.Sprint(float64(319))        →  "319"            （小数字恰好正常）
+//
+// 小米长轮询返回的 `userId` 就是一个大整数（如 146294077）。原来的实现
+// 把它拼进 cookie 变成 `userId=1.46294077e+08`，passport 认不出这个用户 ⇒
+// 免密 serviceLogin 一律回 `code=70016 登录验证失败`（实测：带正确 userId
+// 时 code=0 并下发 sts.api.io.mem 的 location；不带/带错时 70016）。
+//
+// 用 FormatFloat('f', -1, 64) 得到精确十进制整数，且不会引入多余小数位。
 func qrStr(v any) string {
-	if v == nil {
+	switch x := v.(type) {
+	case nil:
 		return ""
+	case string:
+		return x
+	case float64:
+		// -1 = 用最小必要位数；'f' = 定点（绝不出现 e+08 这种指数形式）
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(x), 'f', -1, 32)
+	case json.Number:
+		return x.String()
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprint(v)
 	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fmt.Sprint(v)
 }
 
 func qrInt(v any) int {

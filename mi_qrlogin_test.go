@@ -259,3 +259,36 @@ func TestQRStatusDrivesLongPoll(t *testing.T) {
 		t.Fatal("qr_status 没有发起长轮询：wasm 里没有后台协程，票会无人等待 ⇒ 手机端 70036")
 	}
 }
+
+// TestQRStrNumberNotScientific 钉住扫码 70016 的最终根因：
+// JSON number 解成 float64 后，fmt.Sprint 会把大整数写成科学计数法
+// （146294077 → "1.46294077e+08"），拼进 cookie 后 passport 认不出用户，
+// 免密 serviceLogin 一律回 code=70016。
+//
+// 实测对照（服务器直连小米）：
+//
+//	userId 正确 → code=0，location 指向 sts.api.io.mi.com
+//	userId 缺失/错误 → code=70016 登录验证失败
+func TestQRStrNumberNotScientific(t *testing.T) {
+	cases := []struct {
+		in   any
+		want string
+	}{
+		{float64(146294077), "146294077"},         // 真实 userId 量级
+		{float64(1795337753897), "1795337753897"}, // 时间戳量级
+		{float64(319), "319"},                     // 小整数（旧实现恰好正常）
+		{"146294077", "146294077"},                // 已经是字符串
+		{nil, ""},
+	}
+	for _, c := range cases {
+		if got := qrStr(c.in); got != c.want {
+			t.Errorf("qrStr(%v) = %q（期望 %q）", c.in, got, c.want)
+		}
+	}
+	// 显式断言：任何输入都不得产出指数形式
+	for _, v := range []any{float64(146294077), float64(999999999999)} {
+		if s := qrStr(v); strings.ContainsAny(s, "eE+") {
+			t.Errorf("qrStr(%v) = %q 含指数符号（会被 passport 当成非法 userId）", v, s)
+		}
+	}
+}
