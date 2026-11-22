@@ -250,24 +250,61 @@ func (r *qrRuntime) exchange(out map[string]any) (string, error) {
 	s.HostSessionID = sess
 
 	/*
-	 * 换票顺序（2026-11-22 定稿）：
+	 * 换票顺序（2026-11-22 最终定稿，依据服务器实测）：
 	 *
-	 *   ① **扫码票据直接换**：lp 成功返回的 (location, ssecurity) 就是本次扫码
-	 *      的凭据，最直接、最不可能被 passport 拒。sid=xiaomiio 时它指向
-	 *      `https://sts.api.io.mi.com/sts?...`（服务器实测）。
-	 *   ② passToken → xiaomiio：①不通时的等价退路（MIoT 域）。
-	 *   ③ passToken → micoapi：再退一层（小爱域；只在 ①②都失败时用）。
+	 *   ① **passToken 免密 → xiaomiio**，且必须在**全新会话**里做。
+	 *      实测（干净 jar）：serviceLogin(passToken+userId) 返回完整材料
+	 *        nonce=4913608617542827008  ssecurity=0362N/...  location=sts.api.io.mi.com
+	 *      GET location → Set-Cookie: serviceToken/userId/cUserId ✅
+	 *      随后用同一会话、同一 ssecurity 做 RC4 探针 —— 与密码登录同一条链路。
+	 *   ② passToken → micoapi：等价退路（域不同而已）。
+	 *   ③ 扫码票据直接换（lp 的 location+nonce+ssecurity）：**最后**才试。
 	 *
-	 * 为什么把 ① 提到最前：之前 passToken 优先，而扫码刚拿到的 passToken 在
-	 * passport 那边可能还没"生效"（实测 `serviceLogin 响应缺少
-	 * location/nonce/ssecurity`）。而 ① 用的 location/ssecurity 是同一个响应
-	 * 里配对的，不存在时序问题。
+	 * 为什么 ③ 排最后（用户实测）：
+	 *   `扫码票据换票（host=sts.api.io.mi.com）：小米业务接口拒绝（code=0，
+	 *    说明：invalid signature）（本次已密封票据 3 条）`
+	 *   —— 票据密封成功（STS 认了 clientSign），但 lp 给的 ssecurity 与 STS 最终
+	 *   下发的 serviceToken **不配对**，RC4 签名过不了。而 ① 的 ssecurity 是
+	 *   passport 在同一个响应里与 location 一起给的，配对天然成立。
+	 *
+	 * 关键点：passToken 换票**不能复用扫码会话**。复用会让 passport 把请求当成
+	 * "已有会话"，只回 code=0 + location + psecurity（**没有 nonce/ssecurity**），
+	 * 于是没法签名 —— 这正是用户看到的
+	 *   `serviceLogin 响应缺少 location/nonce/ssecurity（… 有nonce=false …）`。
 	 */
 	var errs []string
 
-	// ① 扫码票据直接换（host 必须可信，否则记下原因继续）
+	// ①② passToken 免密（新会话；每次新 deviceId，与 console 一致）
+	for _, sid := range []string{"xiaomiio", "micoapi"} {
+		if passToken == "" {
+			errs = append(errs, "passToken 缺失，跳过 "+sid)
+			continue
+		}
+		freshID := qrDeviceID()
+		sess2, loc2, ssec2, pt2, ferr := r.serviceLoginWithPassToken(ctx, sid, freshID, userID, passToken)
+		if ferr != nil {
+			errs = append(errs, fmt.Sprintf("%s 取票：%v", sid, ferr))
+			if sess2 != "" {
+				_ = ctx.HTTPClose(sess2)
+			}
+			continue
+		}
+		s.State = "failed"
+		// 换票、密封、探针全部留在**取票那个会话**里（ssecurity ↔ serviceToken 配对）
+		s.HostSessionID = sess2
+		_, e2 := exchangeAndProbe(ctx, sess2, s, loc2, ssec2, pt2)
+		_ = ctx.HTTPClose(sess2)
+		if e2 == nil {
+			r.finish(userID, pt2, freshID)
+			return userID, nil
+		}
+		errs = append(errs, fmt.Sprintf("%s 换票：%v", sid, e2))
+	}
+
+	// ③ 扫码票据直接换（兜底）
 	if loc != "" && nonce != "" && ssec != "" {
 		s.State = "failed"
+		s.HostSessionID = sess
 		if _, err := exchangeAndProbe(ctx, sess, s, withClientSign(loc, nonce, ssec), ssec, passToken); err == nil {
 			r.finish(userID, passToken, deviceID)
 			return userID, nil
@@ -277,29 +314,6 @@ func (r *qrRuntime) exchange(out map[string]any) (string, error) {
 				host = u.Hostname()
 			}
 			errs = append(errs, fmt.Sprintf("扫码票据换票（host=%s）：%v", host, err))
-		}
-	} else {
-		errs = append(errs, "扫码结果缺少 location/nonce/ssecurity")
-	}
-
-	// ②③ passToken 免密重取（每次用新 deviceId；console 也是这个做法）
-	for _, sid := range []string{"xiaomiio", "micoapi"} {
-		if passToken == "" {
-			errs = append(errs, "passToken 缺失，跳过 "+sid)
-			continue
-		}
-		freshID := qrDeviceID()
-		loc2, ssec2, pt2, ferr := r.serviceLoginWithPassToken(ctx, sess, sid, freshID, userID, passToken)
-		if ferr != nil {
-			errs = append(errs, fmt.Sprintf("%s 取票：%v", sid, ferr))
-			continue
-		}
-		s.State = "failed"
-		if _, err := exchangeAndProbe(ctx, sess, s, loc2, ssec2, pt2); err == nil {
-			r.finish(userID, pt2, freshID)
-			return userID, nil
-		} else {
-			errs = append(errs, fmt.Sprintf("%s 换票：%v", sid, err))
 		}
 	}
 
@@ -327,10 +341,38 @@ func (r *qrRuntime) finish(userID, passToken, deviceID string) {
 
 // serviceLoginWithPassToken 用 passToken 免密换新的一组 (location, ssecurity)。
 // Cookie 头显式携带（HTTPSession 允许插件设置 Cookie；jar 里的同名 cookie 会并排附加）。
-func (r *qrRuntime) serviceLoginWithPassToken(ctx *plugin.Context, sess, sid, deviceID, userID, passToken string) (string, string, string, error) {
+// serviceLoginWithPassToken 用 passToken 免密换取新的 (location, ssecurity, passToken)。
+//
+// # 必须用**全新会话**（2026-11-22 实测，用户错误文案里"缺少 nonce/ssecurity"的成因）
+//
+// 复用扫码那个会话时，jar 里已经有 bootstrap 留下的 cookie，passport 会把请求
+// 当成"已有会话"处理，只回一个**简化响应**：
+//
+//	code=0 desc="成功" 有location=true 有nonce=false 有ssecurity=false
+//	字段=[pwd child code securityStatus userId **psecurity** location desc ...]
+//
+// 没有 ssecurity 就没法做 RC4 签名，换票必然失败。而在**干净会话**里同一个请求
+// 返回的是完整材料（服务器实测）：
+//
+//	code=0  nonce=4913608617542827008  ssecurity=0362N/fIMgiRpc+8UJQxjQ==
+//	location=https://sts.api.io.mi.com/sts?...
+//	GET location → Set-Cookie: serviceToken / userId / cUserId
+//
+// 密码登录之所以一直正常，正是因为它每次 `login` 都新开一个宿主会话。
+func (r *qrRuntime) serviceLoginWithPassToken(ctx *plugin.Context, sid, deviceID, userID, passToken string) (string, string, string, string, error) {
 	if sid == "" {
 		sid = "xiaomiio"
 	}
+	// 全新会话：干净 jar ⇒ passport 返回完整 nonce/ssecurity。
+	hs, oerr := ctx.HTTPOpen(plugin.HTTPOpenRequest{})
+	if oerr != nil {
+		return "", "", "", "", fmt.Errorf("开换票会话失败: %w", oerr)
+	}
+	// ⚠ 不在这里关闭：调用方还要用**同一个会话**去 GET location（让 serviceToken
+	// 落进这个干净 jar）并做 RC4 探针。换票跨会话 ⇒ ssecurity 与 serviceToken
+	// 不配对 ⇒ `invalid signature`（用户实测过）。
+	sess := hs.SessionID
+
 	cookie := fmt.Sprintf("sdkVersion=3.9; deviceId=%s; passToken=%s", deviceID, passToken)
 	if userID != "" {
 		cookie = fmt.Sprintf("sdkVersion=3.9; deviceId=%s; userId=%s; passToken=%s", deviceID, userID, passToken)
@@ -345,19 +387,19 @@ func (r *qrRuntime) serviceLoginWithPassToken(ctx *plugin.Context, sess, sid, de
 		TimeoutMS: 20000,
 	})
 	if err != nil {
-		return "", "", "", fmt.Errorf("serviceLogin: %w", err)
+		return sess, "", "", "", fmt.Errorf("serviceLogin: %w", err)
 	}
 	body, err := resp.Body()
 	if err != nil {
-		return "", "", "", err
+		return sess, "", "", "", err
 	}
 	raw := strings.TrimSpace(strings.ReplaceAll(string(body), "&&&START&&&", ""))
 	var d map[string]any
 	if json.Unmarshal([]byte(raw), &d) != nil {
-		return "", "", "", fmt.Errorf("serviceLogin 返回异常: %.120s", raw)
+		return sess, "", "", "", fmt.Errorf("serviceLogin 返回异常: %.120s", raw)
 	}
 	if code := qrInt(d["code"]); code != 0 {
-		return "", "", "", fmt.Errorf("serviceLogin code=%d %s", code, qrStr(d["description"]))
+		return sess, "", "", "", fmt.Errorf("serviceLogin code=%d %s", code, qrStr(d["description"]))
 	}
 	loc := qrStr(d["location"])
 	nonce := qrStr(d["nonce"])
@@ -369,14 +411,14 @@ func (r *qrRuntime) serviceLoginWithPassToken(ctx *plugin.Context, sess, sid, de
 		for k := range d {
 			keys = append(keys, k)
 		}
-		return "", "", "", fmt.Errorf(
+		return sess, "", "", "", fmt.Errorf(
 			"serviceLogin 响应缺少 location/nonce/ssecurity（code=%d desc=%q 有location=%v 有nonce=%v 有ssecurity=%v 字段=%v）",
 			qrInt(d["code"]), qrStr(d["description"]), loc != "", nonce != "", ssec != "", keys)
 	}
 	if pt := qrStr(d["passToken"]); pt != "" {
 		passToken = pt // 服务端轮换时采用新值
 	}
-	return withClientSign(loc, nonce, ssec), ssec, passToken, nil
+	return sess, withClientSign(loc, nonce, ssec), ssec, passToken, nil
 }
 
 // deviceID 取稳定的设备标识（落盘复用；首次生成 16 位大写 hex）。
