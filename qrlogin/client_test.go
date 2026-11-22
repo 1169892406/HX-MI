@@ -123,10 +123,11 @@ func TestScanAndPersist(t *testing.T) {
 		t.Fatal("Start 未返回二维码链接")
 	}
 
-	// 轮询到 ok（最长 5 秒）
+	// 轮询到 ok（最长 5 秒）——由 Poll 驱动（Start 不再起后台协程，见 client.go 注释）
 	deadline := time.Now().Add(5 * time.Second)
 	var final Status
 	for time.Now().Before(deadline) {
+		c.Poll(300 * time.Millisecond)
 		final = c.Status()
 		if final.State == "ok" || final.State == "error" {
 			break
@@ -269,6 +270,7 @@ func TestExchangeMode(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var final Status
 	for time.Now().Before(deadline) {
+		c.Poll(300 * time.Millisecond)
 		final = c.Status()
 		if final.State == "ok" || final.State == "error" {
 			break
@@ -326,9 +328,15 @@ func TestExchangeModeFailure(t *testing.T) {
 		},
 	})
 	_, _ = c.Start()
+	/*
+	 * ★ 2026-11-22：等待不再由后台协程驱动，改由 **Poll** 驱动
+	 * （wasm c-shared 里协程不推进；Start 已不再 `go c.wait`）。
+	 * 用例同步改成"像 qr_status 那样调用 Poll"，否则它测的是已删掉的路径。
+	 */
 	deadline := time.Now().Add(5 * time.Second)
 	var final Status
 	for time.Now().Before(deadline) {
+		c.Poll(300 * time.Millisecond)
 		final = c.Status()
 		if final.State == "ok" || final.State == "error" {
 			break

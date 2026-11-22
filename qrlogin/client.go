@@ -225,7 +225,19 @@ func (c *Client) Start() (Status, error) {
 	c.lpURL = strOf(data["lp"])
 	c.lpHeaders = map[string]string{"User-Agent": randomUA()}
 	c.mu.Unlock()
-	go c.wait(data, stop)
+	/*
+	 * ★★ 2026-11-22：**不再起后台协程**。
+	 *
+	 * 两重理由，都是实测出来的：
+	 *  ① wasm c-shared 的 Go 运行时在导出函数返回后没有调度器，协程根本不推进
+	 *     （证据：qr_status 曾长期只花 3ms，那张票从来没人等）；
+	 *  ② 即使偶尔跑起来，它遇到一次 403/非 JSON 就会把 state 写成 error ——
+	 *     而真正在驱动轮询的是 Poll（每次 qr_status 调一次）。让两个驱动源
+	 *     互相覆盖状态，是"手机说成功、插件没反应"的成因之一。
+	 *
+	 * 现在等待只由 Poll 驱动（见 qr_status），状态只有一个写入者。
+	 */
+	_ = stop
 	c.logf("已生成登录二维码，有效期 %.0fs", time.Until(c.deadline).Seconds())
 	return st, nil
 }
@@ -264,6 +276,8 @@ func (c *Client) Poll(timeout time.Duration) {
 	 * 真过期由下面的 deadline 分支负责终止。
 	 */
 	if c.lpURL == "" || (c.state != "waiting" && c.state != "error") {
+		c.pollStatus = -1
+		c.pollNote = fmt.Sprintf("Poll 跳过：lpURL=%d state=%s", len(c.lpURL), c.state)
 		c.mu.Unlock()
 		return
 	}
@@ -277,6 +291,10 @@ func (c *Client) Poll(timeout time.Duration) {
 	c.mu.Unlock()
 
 	if !time.Now().Before(deadline) {
+		c.mu.Lock()
+		c.pollStatus = -2
+		c.pollNote = "二维码已过期"
+		c.mu.Unlock()
 		c.fail("二维码已过期，请重新获取")
 		return
 	}

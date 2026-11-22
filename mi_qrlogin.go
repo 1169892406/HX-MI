@@ -501,7 +501,24 @@ func qrStartTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, er
 // 就当"还没扫"继续下一次）。拿到 code=0 后照常走换票 + 账号登记。
 func qrStatusTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, error) {
 	c := qrClientFor(ctx)
-	c.Poll(2200 * time.Millisecond)
+	/*
+	 * ★★ 2026-11-22（用户「手机上说登录成功，PC 上还没有任何提示」第二次）：
+	 *
+	 * 这里原来给 2200ms，理由是"落在 manifest execution_timeout_ms=30000 内"。
+	 * 但**部署配置会覆盖 manifest**：这台机器的 homex.yaml 写的是
+	 * `plugin.execution_timeout_ms: 3000`（3 秒）。2.2s 的长轮询 + 换票 + 序列化
+	 * 正好撞线 ⇒ 平台在 3s 处把调用掐掉，插件侧表现为"瞬时返回、什么都没拿到"，
+	 * 于是永远停在「等待扫码」。
+	 *
+	 * 改成 **800ms**：单次调用远低于部署上限（连金属开销约 0.9s，留足余量），
+	 * 而前端每 2 秒轮一次 —— 等效等待密度不变（每 2 秒问一次），只是把
+	 * "一次问很久"换成"每次问很短"。服务端 hold 到有结果就立刻返回，
+	 * 所以真扫码成功时**下一个 tick（≤2s）就能拿到 code=0**。
+	 *
+	 * 这也是唯一在 3 秒预算下**稳定**的做法：预算不归插件管，插件只能保证
+	 * 自己每一次调用都远小于它。
+	 */
+	c.Poll(800 * time.Millisecond)
 	st := c.Status()
 	out := map[string]any{
 		"ok":         true,
