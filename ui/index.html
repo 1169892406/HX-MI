@@ -245,6 +245,8 @@
      但**脚本从没运行** —— 表现是账号列表永远停在「读取中…」、返回按钮点不动、
      同步区全空，而且控制台一条错误都没有（没有脚本，自然没有报错）。
      闸门 tools/check-ui-handshake.mjs 已加断言钉住"index.html 必须引用 app.js"。 -->
-<script src="app.js"></script>
+<!-- 平台 SDK 小工具：高度上报 + 平台滚动条（2026-11-22，见 docs/plugin-ui-guide.md） -->
+  <script src="hx-plugin-ui.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

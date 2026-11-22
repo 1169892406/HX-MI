@@ -218,6 +218,7 @@
     // 主题下发：插件页是 opaque origin，读不到父窗口的 document.theme；
     // 只能由宿主在消息里告诉它。收到就切 data-theme，未收到时由 CSS 兜底。
     if (m.type === 'theme' && typeof m.theme === 'string') {
+      if (uiKit) uiKit.acceptHostFrame(m);
       applyTheme(m.theme);
       return;
     }
@@ -272,33 +273,29 @@
 
   window.addEventListener('message', onWindowMessage);
 
-  /* ── 内容高度上报（与平台同一条滚动条）────────────────── */
+  /* ── 内容高度上报 + 平台滚动条（2026-11-22 改用平台 SDK 小工具）────────
 
-  var lastH = 0;
-  var hTimer = null;
+     历史：本文件自己写 ResizeObserver + 去抖 + plugin.ui.resize，与 HXCS 那份
+     细节不同（高度口径、clamp 区间各一个数字），用户最终看到的是
+     「插件侧的滚动条，不是平台的滚动条」—— 长页超过宿主旧上限 2000 时，
+     iframe 内部自己滚，平台那条滚动条根本没机会出现。
 
-  function reportHeight() {
-    var h = Math.ceil(document.body.getBoundingClientRect().height);
-    if (h <= 0 || Math.abs(h - lastH) < 1) return;
-    lastH = h;
-    rpc('plugin.ui.resize', { height: h }).catch(function () {});
+     现在统一走 sdk/js/hx-plugin-ui.js（复制进 ui/ 的那个文件）：
+       · 高度口径一致（documentElement.scrollHeight vs body 盒高取大 + 补 margin）；
+       · clamp 区间由**宿主下发**（theme 帧 height_range），不再各写一个数字；
+       · 宿主声明 scrollbar:'host' 时自动把文档自身滚动关掉（子元素该滚的照滚）。
+   */
+  var uiKit = null;
+
+  function startHeightReporting() {
+    if (uiKit || typeof HxPluginUi === 'undefined') return;
+    uiKit = HxPluginUi.start({
+      rpc: function (op, payload) { return rpc(op, payload); }
+    });
   }
 
   function scheduleHeight() {
-    if (hTimer) clearTimeout(hTimer);
-    hTimer = setTimeout(reportHeight, 150);
-  }
-
-  function startHeightReporting() {
-    reportHeight();
-    if (typeof ResizeObserver !== 'function') {
-      window.addEventListener('resize', scheduleHeight);
-      return;
-    }
-    var ro = new ResizeObserver(scheduleHeight);
-    ro.observe(document.body);
-    var wrap = document.querySelector('.wrap');
-    if (wrap) ro.observe(wrap);
+    if (uiKit) uiKit.report();
   }
 
   /* ── 提示条（可带操作按钮）────────────────────────────── */
