@@ -60,13 +60,13 @@ type Client struct {
 	/* 长轮询地址与请求头（Poll 用；wait 也用同一份） */
 	lpURL     string
 	lpHeaders map[string]string
-	deadline time.Time
-	userID   string
-	waitStop chan struct{}
-	waiting  bool
-	o        Options
-	tr       Transport
-	store    storeBucket
+	deadline  time.Time
+	userID    string
+	waitStop  chan struct{}
+	waiting   bool
+	o         Options
+	tr        Transport
+	store     storeBucket
 }
 
 // Options 构造参数。零值可用（TokenPath 必填才有落盘）。
@@ -247,7 +247,19 @@ func (c *Client) Status() Status {
 // 看到 state != waiting 就退出）。
 func (c *Client) Poll(timeout time.Duration) {
 	c.mu.Lock()
-	if c.state != "waiting" || c.lpURL == "" {
+	/*
+	 * 只要求"票还在有效期内且有 lp 地址"，**不要求 state==waiting**。
+	 *
+	 * 为什么要放宽（2026-11-22）：wait 协程（原生进程里会跑）曾把一次 403 判成
+	 * error，此后 Poll 因为 state!=waiting 直接返回 ⇒ 用户手机明明确认成功，
+	 * 插件这边再也拿不到结果。票没过期就继续问，是这里唯一正确的判据 ——
+	 * 真过期由下面的 deadline 分支负责终止。
+	 */
+	if c.lpURL == "" || (c.state != "waiting" && c.state != "error") {
+		c.mu.Unlock()
+		return
+	}
+	if c.state == "error" && c.userID != "" {
 		c.mu.Unlock()
 		return
 	}
@@ -403,8 +415,21 @@ func (c *Client) wait(data map[string]any, stop chan struct{}) {
 
 		out := map[string]any{}
 		if json.Unmarshal(passportStrip(body), &out) != nil {
-			c.fail("长轮询返回异常: " + trunc(string(body), 120))
-			return
+			/*
+			 * ★ 2026-11-22（用户「app 提示扫码成功登录了，插件侧没有反应」）：
+			 *
+			 * 这里原来直接 `c.fail(...)`。而长轮询的非 JSON 响应（403/Hold 被中断的
+			 * 风控页/网关错误页）**不代表扫码失败** —— 它只说明这一次请求被掐了。
+			 * 一旦判死，用户手机上明明点了确认，插件却永远停在 error：
+			 *   实测文案「长轮询返回异常: <!DOCTYPE HTML ... 403 Forbidden>」
+			 *   而同一时刻 Poll（每次 qr_status 驱动的那种）还能拿到 code=0。
+			 *
+			 * 正确语义：**这次没拿到结果就继续下一次**（与 lpErr 超时同一处理）。
+			 * 只有"二维码过期"和"用户取消"才是终止条件。
+			 */
+			c.logf("长轮询本次响应不可解析（按未扫继续）：%s", trunc(string(body), 80))
+			time.Sleep(300 * time.Millisecond)
+			continue
 		}
 		if code := intOf(out["code"]); code != 0 {
 			// 服务端超时/未扫：继续下一轮轮询
