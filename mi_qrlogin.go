@@ -511,6 +511,11 @@ func qrStatusTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessage, e
 		"expires_in": st.ExpiresIn,
 		"user_id":    st.UserID,
 	}
+	// 排障字段：手机说成功而这里还 waiting 时，凭它判断是 403/网络/服务端未就绪
+	if st.PollStatus != 0 || st.PollNote != "" {
+		out["poll_status"] = st.PollStatus
+		out["poll_note"] = st.PollNote
+	}
 	return json.Marshal(out)
 }
 

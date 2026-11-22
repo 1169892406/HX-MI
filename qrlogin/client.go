@@ -43,11 +43,16 @@ func (c *Client) sid() string {
 
 // Status 扫码会话状态。
 type Status struct {
-	State     string `json:"state"`      // idle | waiting | ok | error
-	Message   string `json:"message"`    // 人类可读的说明
-	LoginURL  string `json:"login_url"`  // 二维码内容（waiting 时非空）
-	ExpiresIn int    `json:"expires_in"` // 二维码剩余有效秒数
-	UserID    string `json:"user_id"`    // 成功后非空
+	State    string `json:"state"`     // idle | waiting | ok | error
+	Message  string `json:"message"`   // 人类可读的说明
+	LoginURL string `json:"login_url"` // 二维码内容（waiting 时非空）
+	// PollStatus / PollNote 是最近一次长轮询的诊断（HTTP 状态码 + 错误或响应首段）。
+	// 只用于排障：手机说"登录成功"而插件停在等待时，凭它就能判断是
+	// "请求被掐(403)" / "网络没通" / "服务端还没结果"，不必靠猜。
+	PollStatus int    `json:"poll_status,omitempty"`
+	PollNote   string `json:"poll_note,omitempty"`
+	ExpiresIn  int    `json:"expires_in"` // 二维码剩余有效秒数
+	UserID     string `json:"user_id"`    // 成功后非空
 }
 
 // Client 扫码登录会话管理。
@@ -60,13 +65,16 @@ type Client struct {
 	/* 长轮询地址与请求头（Poll 用；wait 也用同一份） */
 	lpURL     string
 	lpHeaders map[string]string
-	deadline  time.Time
-	userID    string
-	waitStop  chan struct{}
-	waiting   bool
-	o         Options
-	tr        Transport
-	store     storeBucket
+	/* 最近一次轮询诊断 */
+	pollStatus int
+	pollNote   string
+	deadline   time.Time
+	userID     string
+	waitStop   chan struct{}
+	waiting    bool
+	o          Options
+	tr         Transport
+	store      storeBucket
 }
 
 // Options 构造参数。零值可用（TokenPath 必填才有落盘）。
@@ -275,17 +283,33 @@ func (c *Client) Poll(timeout time.Duration) {
 	if headers == nil {
 		headers = map[string]string{"User-Agent": randomUA()}
 	}
+	startedAt := time.Now()
 	resp, err := c.trDo(lpURL, headers, timeout)
 	if err != nil {
-		// 超时/网络错误不算失败：手机还没扫，下一次调用继续
+		// 超时/网络错误不算失败：手机还没扫，下一次调用继续。
+		// 但诊断要留下：否则"手机成功、插件无反应"只能靠猜。
+		c.mu.Lock()
+		c.pollStatus = 0
+		c.pollNote = fmt.Sprintf("request 失败(%dms): %v", time.Since(startedAt).Milliseconds(), err)
+		c.mu.Unlock()
 		return
 	}
 	out := map[string]any{}
 	if json.Unmarshal(passportStrip(resp.Body), &out) != nil {
+		c.mu.Lock()
+		c.pollStatus = resp.Status
+		c.pollNote = fmt.Sprintf("非 JSON(%dms, %d bytes): %s", time.Since(startedAt).Milliseconds(),
+			len(resp.Body), trunc(string(resp.Body), 90))
+		c.mu.Unlock()
 		return
 	}
 	if code := intOf(out["code"]); code != 0 {
 		// 服务端"还没扫"也走这里（非 0 code），继续等
+		c.mu.Lock()
+		c.pollStatus = resp.Status
+		c.pollNote = fmt.Sprintf("code=%d %s (%dms)", code, strOf(out["description"]),
+			time.Since(startedAt).Milliseconds())
+		c.mu.Unlock()
 		return
 	}
 	c.logf("扫码通过（Poll 驱动，字段：%s）", keysOf(out))
@@ -318,6 +342,7 @@ func (c *Client) statusLocked() Status {
 	return Status{
 		State: c.state, Message: c.message, LoginURL: showURL,
 		ExpiresIn: in, UserID: c.userID,
+		PollStatus: c.pollStatus, PollNote: c.pollNote,
 	}
 }
 
