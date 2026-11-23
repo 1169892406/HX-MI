@@ -309,10 +309,38 @@ console.log('== U19 回来的数据真的能渲染');
   // 健康表走 innerHTML 路径（FakeEl 不解析 HTML，文本抓不到）——
   // 判据改为「renderHealth 真的跑了」：innerHTML 非空且包含表头列名。
   const hth = getEl('health-table');
-  ok('U19j 局域网检查列表真的渲染（表头+行数据）',
+  /*
+   * 2026-11-23 用户裁定：「局域网检查：移除版本、型号、通信路径 仅显示移除，
+   * 这些值在其他地方有用的」。所以列表只剩三列：设备名称 / 健康状态 / 耗时。
+   *
+   * 断言因此改成两件事一起管：
+   *   ① 该在的还在（设备名、健康状态、耗时）；
+   *   ② 该撤的真的撤了（型号、版本、通信路径 / path_detail 不再出现在列表里）
+   *      —— 否则"只删表头忘了删单元格"这类半截改动会被漏过。
+   * 数据层不动（health_list 仍返回 model/version/path），设备详情照用。
+   */
+  ok('U19j 局域网检查列表渲染三列（设备名称/健康状态/耗时），型号与路径已按用户要求撤下',
     typeof hth.innerHTML === 'string' && hth.innerHTML.includes('设备名称')
-      && hth.innerHTML.includes('台灯') && hth.innerHTML.includes('局域网直连'),
+      && hth.innerHTML.includes('健康状态') && hth.innerHTML.includes('耗时')
+      && hth.innerHTML.includes('台灯')
+      && !hth.innerHTML.includes('型号') && !hth.innerHTML.includes('版本')
+      && !hth.innerHTML.includes('通信路径') && !hth.innerHTML.includes('局域网直连'),
     `innerHTML 长度 ${String(hth.innerHTML || '').length}`);
+
+  /*
+   * 2026-11-23 用户：「局域网检测列表：在线在最上面，离线在下面」。
+   *
+   * 夹具里台灯=在线、补光灯=离线。断言在 HTML 里「台灯」出现在「补光灯」之前
+   * —— 直接比字符串下标，比解析 DOM 更不容易被结构变化带偏；顺序反了立刻红。
+   */
+  (function () {
+    const h = String(hth.innerHTML || '');
+    const iOn = h.indexOf('台灯');
+    const iOff = h.indexOf('补光灯');
+    ok('U19j2 局域网检查列表在线在上、离线在下',
+      iOn >= 0 && iOff >= 0 && iOn < iOff,
+      `在线行位置 ${iOn} / 离线行位置 ${iOff}（必须 在线 < 离线）`);
+  })();
 
   // 2026-11-20 用户要求三连：账号列显示票据状态；页面删冗余小字；
   // 局域网检查列表挂账号/家庭筛选框。
@@ -321,11 +349,13 @@ console.log('== U19 回来的数据真的能渲染');
     'accounts 工具给了 token_updated_at/token_account，对应行必须显示');
   // 2026-11-21 用户裁定：健康表**不再**印账号副行（顶端已有「所属账号」筛选）。
   // 断言改为「设备名与路径仍在」+「不再重复账号」——跟着产品口径走，不守旧文案。
-  ok('U19l 健康表行只有设备名与通信路径（账号副行已按用户要求移除）',
+  // 2026-11-23：行内只留设备名 —— 账号副行（11-21 要求）与通信路径副行
+  // （11-23 要求）都已撤下；两者数据仍在 health_list 中，供设备详情使用。
+  ok('U19l 健康表行只显示设备名（账号副行与通信路径副行均已撤下）',
     typeof hth.innerHTML === 'string' && hth.innerHTML.includes('台灯')
-      && hth.innerHTML.includes('192.168.1.75')
+      && !hth.innerHTML.includes('192.168.1.75')
       && !hth.innerHTML.includes('1169892406@qq.com'),
-    '顶端有账号筛选，行内重复账号是噪音');
+    '行内不再有账号与路径副行；顶端有账号筛选，详情里有通信路径');
   ok('U19m 冗余小字已删（风险盒/探测备注/绑定备注/拆分备注）',
     !HTML.includes('riskbox') && !HTML.includes('nohint')
       && !HTML.includes('addsync-note') && !HTML.includes('filters__note'),

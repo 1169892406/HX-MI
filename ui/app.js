@@ -2469,9 +2469,37 @@
       addStat(tiles2, nOff, '离线', nOff > 0 ? 'warn' : '');
     }
 
+    /*
+     * 排序：在线在上、离线在下（2026-11-23 用户：「局域网检测列表：在线在最上面，
+     * 离线在下面」）。
+     *
+     * 口径与左侧设备列表一致（那里按 online(0)/unknown(1)/offline(2) 排）：
+     * 用户扫一眼要先看到"现在能用哪些"，离线的放在最后当待办。
+     * 同档内保留后端给的原始顺序（后端是按登记顺序返回，稳定），不额外按名字
+     * 重排 —— 用户没有要求按字母序，重排会让每次刷新行位置乱跳。
+     *
+     * 注意：`list` 是筛后数组（按账号/家庭过滤），排序不影响统计磁贴的口径
+     * （磁贴在上面已按排序前的同一批数据算完，数量与排序无关）。
+     */
+    var rankOf = function (x) {
+      var st = (x || {}).status || '';
+      if (st === '在线') return 0;
+      if (st === '离线') return 2;
+      return 1; // 云端可用 / 网关 / 未知：介于两者之间
+    };
+    list = list.slice().sort(function (a, b) { return rankOf(a) - rankOf(b); });
+
+    /*
+     * 列表只保留「设备名称 / 健康状态 / 耗时」三列（2026-11-23 用户：
+     * 「局域网检查：移除版本、型号、通信路径 仅显示移除，这些值在其他地方有用的」）。
+     *
+     * ⚠ 只在**显示层**移除：health_list 的返回值（model / version / path /
+     * path_detail）一个字都不删 —— 设备详情的「通信路径」、型号推断、
+     * 版本比对都还在用它们。谁要"顺手把数据也删掉"，那些功能会静默失效。
+     */
     var html = '<table><thead><tr>' +
-      '<th>设备名称</th><th>型号</th><th style="width:120px">版本</th>' +
-      '<th style="width:100px">健康状态</th><th style="width:92px">耗时</th><th style="width:170px">通信路径</th>' +
+      '<th>设备名称</th>' +
+      '<th style="width:120px">健康状态</th><th style="width:92px">耗时</th>' +
       '</tr></thead><tbody>';
     for (var i = 0; i < list.length; i++) {
       var d = list[i] || {};
@@ -2481,7 +2509,8 @@
         : status === '云端可用' ? 'cloud' : 'gw';
       var lat = d.latency || '不适用';
       var latCls = lat === '不适用' ? 'na' : (status === '在线' ? 'ok' : 'bad');
-      var pathText = (d.path || '—') + (d.path_detail ? ' · ' + d.path_detail : '');
+      // pathText 不在列表里显示了；数据仍由 health_list 提供（设备详情用）。
+
       var rowDid = d.did || '';
       var rowSel = rowDid && rowDid === healthSelDid ? ' class="hrow hrow--sel"' : ' class="hrow"';
       html += '<tr' + rowSel + ' data-did="' + esc(rowDid) + '">' +
@@ -2491,14 +2520,15 @@
          * 同一屏顶端就有「所属账号」筛选框，每行再印一遍邮箱是纯噪音；
          * 设备归属仍可从筛选框+行数推断，信息没丢。
          */
-        (d.path_detail ? '<span class="hsub">' + esc(d.path_detail) + '</span>' : '') + '</td>' +
-        '<td><span class="hver">' + esc(d.model) + '</span></td>' +
-        '<td><span class="hver">' + esc(d.version || '-') + '</span></td>' +
+        /*
+         * path_detail（「局域网 192.168.1.75」）也属通信路径，同样只在显示层撤掉
+         * （2026-11-23）。数据仍在 health_list 里，设备详情的「通信路径」照用。
+         */
+        '</td>' +
         '<td><span class="hst hst--' + cls + '">' + esc(status) + '</span>' +
         (status !== '在线' && d.offline_since
           ? '<span class="hsub">' + esc(fmtSince(d.offline_since)) + '</span>' : '') + '</td>' +
         '<td><span class="hlat hlat--' + latCls + '">' + esc(lat) + '</span></td>' +
-        '<td class="muted small">' + esc(pathText) + '</td>' +
         '</tr>';
     }
     html += '</tbody></table>';

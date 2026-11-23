@@ -201,15 +201,84 @@ func firstErrorCode(rows []map[string]any) int {
 }
 
 // readBackBool 写后回读一次（同一通道，局域网优先）。读不到就不给结论。
+// pickBoolAt 从返回行里挑出**指定 (siid,piid)** 的 bool 值。
+//
+// # 为什么必须按 siid/piid 精确匹配（2026-11-23，用户「指示灯关不掉/状态不变」根因）
+//
+// 原实现是「遍历返回行，取第一个 bool」：
+//
+//	for _, row := range rows {
+//	    if b, ok := row["value"].(bool); ok { return b, true }
+//	}
+//
+// 设备有多路可写开关时（台灯 chuangmi.plug.m3：service 2 = 主开关、service 3 =
+// 指示灯），get_properties 一起回来的行里**第一个 bool 往往是主开关**。于是：
+//
+//	写 3.1=false（关指示灯）→ 设备真实变成 {'2.1':true,'3.1':false}（写入成功）
+//	                          → read_back 却读到 2.1=true
+//	                          → 界面把开关画成「开」⇒ 用户点了没反应
+//
+// 实测（服务器，alpha.199）：连写 false/true/false，read_back 恒为 True，
+// 而 device_detail 的 values 显示 3.1 确实在变 —— 写入没问题，是回读读错了路。
+//
+// 兜底：行里没有 siid/piid（个别固件/网关不回这两个字段）时，只在**只有一行**
+// 的情况下采用 —— 多行而又无从区分时宁可报"读不确定"，让前端用期望值，
+// 也不要拿另一路的状态冒充这一路。
+func pickBoolAt(rows []map[string]any, siid, piid int) (bool, bool) {
+	var only map[string]any
+	for _, row := range rows {
+		b, ok := row["value"].(bool)
+		if !ok {
+			continue
+		}
+		rs, rok := intField(row, "siid")
+		rp, pok := intField(row, "piid")
+		if rok && pok {
+			if rs == siid && rp == piid {
+				return b, true
+			}
+			continue // 明确属于别的属性：跳过，绝不能拿来冒充
+		}
+		if only == nil {
+			only = row
+		} else {
+			only = row // 多行都缺 siid/piid：无法区分，置为不可判定
+			return false, false
+		}
+	}
+	if only != nil {
+		if b, ok := only["value"].(bool); ok {
+			return b, true
+		}
+	}
+	return false, false
+}
+
+// intField 从返回行里取整数字段（JSON 数字常解成 float64，也可能是字符串）。
+func intField(row map[string]any, key string) (int, bool) {
+	switch v := row[key].(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case string:
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
 func readBackBool(ctx *plugin.Context, d miioDevice, siid, piid int,
 	params []map[string]any) (bool, bool) {
 	if !strings.HasPrefix(strings.ToLower(d.Model), "lumi.") && strings.TrimSpace(d.Host) != "" {
 		if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil && len(tok) == 16 {
 			if rows, e := miioBatchProperties(ctx, d, tok, "get_properties", params); e == nil {
-				for _, row := range rows {
-					if b, ok := row["value"].(bool); ok {
-						return b, true
-					}
+				if b, ok := pickBoolAt(rows, siid, piid); ok {
+					return b, true
 				}
 			}
 		}
@@ -218,10 +287,8 @@ func readBackBool(ctx *plugin.Context, d miioDevice, siid, piid int,
 		rows, rerr := cloudRequestMIoTSpec(ctx, sessionID, ssec, devID, "prop/get", params)
 		_ = ctx.HTTPClose(sessionID)
 		if rerr == nil {
-			for _, row := range rows {
-				if b, ok := row["value"].(bool); ok {
-					return b, true
-				}
+			if b, ok := pickBoolAt(rows, siid, piid); ok {
+				return b, true
 			}
 		}
 	}
