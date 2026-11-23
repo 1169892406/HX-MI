@@ -109,6 +109,7 @@
    * 裁掉，那是"改 UI 砍功能"，用户明令禁止。
    */
   function applyAdaptive(root) {
+    injectAdaptiveStyle();
     if (!root || !root.style) return;
     try {
       // ① 横向撑满：清掉插件自己写的居中上限
@@ -126,6 +127,58 @@
        * visible，又出现内层滚动条。
        * 纵向归 applyHostScrollbar 一家管，这里只做横向。
        */
+    } catch (e) {}
+  }
+
+  /**
+   * 统一的页面间距标准（2026-11-23 用户：「你这个自适应能不能写同一套，在 SDK 中
+   * 写死统一要求，一个插件间隔大一个小的，所有插件统一标准」）。
+   *
+   * ## 统一到哪一套
+   *
+   * 取**平台自己页面的值** `--sp-4 = 16px`。理由：插件页与平台页在同一个可视区里
+   * 上下相邻，只有用同一套数值，切换页面时内容的左右起始线才会对齐。
+   *
+   * 改之前三个页面的实测值：
+   *   HX-MI  .wrap padding: 18px 24px 56px   → 左右 24
+   *   HXCS   .wrap 只写了 padding-bottom    → 左右 **0**（内容贴边、右侧大片空白）
+   *   官方页 由平台 .page 的 var(--sp-4) 给  → 左右 16
+   * 这就是"一个插件间隔大一个小的"的直接来源。
+   *
+   * ## 为什么用注入 <style> 而不是改 inline style
+   *
+   * inline 只能改**一个**元素，而插件往往有 `.wrap` / `#app` / `main` 多种写法，
+   * 还可能带 `!important` 的媒体查询。注入一段带 `!important` 的样式表能一次性
+   * 覆盖这些差异，且不依赖插件改自己的 CSS（旧版插件装上 SDK 即统一）。
+   * 只作用于 **body 的直接子元素**，不碰插件内部任何容器 —— 内部布局归插件自己。
+   *
+   * 底部留 32px：插件页末尾常有「保存/取消」这类按钮，贴底会显得局促。
+   */
+  var ADAPTIVE_STYLE_ID = 'hx-plugin-adaptive';
+  var PAGE_PAD = '16px';
+  var PAGE_PAD_BOTTOM = '32px';
+
+  function injectAdaptiveStyle() {
+    if (document.getElementById(ADAPTIVE_STYLE_ID)) return;
+    try {
+      var st = document.createElement('style');
+      st.id = ADAPTIVE_STYLE_ID;
+      /*
+       * 只选 body 直接子元素：`.wrap`/`#app`/`main`/`.container`/`.page`。
+       * 用 :where() 保持特异性为 0，再靠 !important 压过插件自己的声明。
+       */
+      st.textContent = [
+        'body > .wrap, body > #app, body > main, body > .container, body > .page {',
+        '  max-width: none !important;',
+        '  width: 100% !important;',
+        '  margin-left: 0 !important;',
+        '  margin-right: 0 !important;',
+        '  padding: ' + PAGE_PAD + ' !important;',
+        '  padding-bottom: ' + PAGE_PAD_BOTTOM + ' !important;',
+        '  box-sizing: border-box !important;',
+        '}',
+      ].join('\n');
+      document.head.appendChild(st);
     } catch (e) {}
   }
 
@@ -271,5 +324,18 @@
     };
   }
 
-  global.HxPluginUi = { start: start, version: 1 };
+  /*
+   * 对外暴露的统一标准（2026-11-23 用户：「后续走 SDK 统一标准」）。
+   * 插件**不应**再自己写这些数值 —— 需要时就引用它，保证与平台一致。
+   */
+  global.HxPluginUi = {
+    start: start,
+    version: 1,
+    /** 页面左右/上内边距（与平台 --sp-4 一致） */
+    pagePadding: PAGE_PAD,
+    /** 页面底部内边距（与平台 --sp-6 一致，给底部按钮留白） */
+    pagePaddingBottom: PAGE_PAD_BOTTOM,
+    /** 自适应样式表 id（排障时可在 DevTools 里按它找到注入的规则） */
+    adaptiveStyleId: ADAPTIVE_STYLE_ID,
+  };
 })(window);

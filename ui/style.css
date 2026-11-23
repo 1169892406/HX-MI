@@ -83,12 +83,17 @@ body {
  * 插件不再自带居中上限 —— 否则宽屏下缩成中间一条、右侧一片空白。
  * 纵向滚动仍全部归平台页（scrollbar:'host'），这里不造内层滚动容器。
  */
+/*
+ * 间距由平台 SDK 的 applyAdaptive 统一注入（2026-11-23 用户：
+ * 「在 SDK 中写死统一要求……所有插件统一标准」）。
+ * 这里**不再写 padding / max-width** —— 本插件若自己写，就会和别的插件不一致
+ * （改之前：HX-MI 左右 24px、HXCS 左右 0px、官方页 16px，用户一眼就看出
+ * "一个间隔大一个间隔小"）。标准值只有一处：sdk/js/hx-plugin-ui.js 的 PAGE_PAD。
+ */
 .wrap {
-  max-width: none;
   width: 100%;
   box-sizing: border-box;
   margin: 0;
-  padding: 18px 24px 56px;
 }
 .spacer { flex: 1 1 auto; min-width: 8px; }
 .muted { color: var(--muted); }
