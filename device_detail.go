@@ -252,7 +252,11 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 			}
 		}
 	}
-	out["controls"] = controls
+	/*
+	 * ★ 老协议设备裁掉规格里实际不通的属性（2026-11-24，详见 filterControlsForDevice）：
+	 * 否则详情页投出「指示灯 开关」而它的值永远读不到（-30001），开关一直显示「未知」。
+	 */
+	out["controls"] = filterControlsForDevice(ctx, d.ExternalID, d.Model, controls)
 	out["sensors"] = sensors
 
 	// —— ② 实时层：把可读属性真的读一遍 ——
@@ -265,8 +269,52 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 	}
 	source := ""
 	var readErr error
+	/*
+	 * ★★ 老协议设备：用 `get_prop` + 字符串属性名读（2026-11-24）
+	 * 参考 hass-xiaomi-miot：'prop.2.1': power, 'prop.2.2': temperature。
+	 * MIoT 的 get_properties(siid/piid) 在这类固件上稳定回 -30001（实测 3 次一致）。
+	 * 把 get_prop 的结果按老协议映射填回 (siid,piid) 键，与下面 MIoT 路径同形。
+	 */
+	if strings.TrimSpace(d.Host) != "" {
+		if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil && len(tok) == 16 &&
+			isLegacyDevice(ctx, d, tok) {
+			names := []string{}
+			for _, rp := range readParams {
+				siid, _ := rp["siid"].(int)
+				piid, _ := rp["piid"].(int)
+				switch fmt.Sprintf("%d.%d", siid, piid) {
+				case "2.1":
+					names = append(names, "power")
+				case "2.2":
+					names = append(names, "temperature")
+				}
+			}
+			if len(names) > 0 {
+				if got, gerr := legacyGetProp(ctx, d, tok, names); gerr == nil {
+					source = "lan"
+					for _, rp := range readParams {
+						siid, _ := rp["siid"].(int)
+						piid, _ := rp["piid"].(int)
+						key := fmt.Sprintf("%d.%d", siid, piid)
+						switch key {
+						case "2.1":
+							if on, ok := legacyPowerValue(got["power"]); ok {
+								values[key] = on
+							}
+						case "2.2":
+							if t, ok := legacyNumber(got["temperature"]); ok {
+								values[key] = t
+							}
+						}
+					}
+				} else {
+					readErr = gerr
+				}
+			}
+		}
+	}
 	// 局域网优先（有地址 + token）；lumi.* 是网关子设备，直连必超时，直接走云端。
-	if !strings.HasPrefix(strings.ToLower(d.Model), "lumi.") &&
+	if source == "" && !strings.HasPrefix(strings.ToLower(d.Model), "lumi.") &&
 		strings.TrimSpace(d.Host) != "" {
 		if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil && len(tok) == 16 {
 			rows, rerr := miioBatchProperties(ctx, d, tok, "get_properties", readParams)

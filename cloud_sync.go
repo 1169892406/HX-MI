@@ -297,7 +297,7 @@ func syncCloudDevices(ctx *plugin.Context) (map[string]int, error) {
 			Capabilities: ds[index[external]].Capabilities, Available: &avail,
 			// 规格驱动的控件明细（2026-11-17）：平台据此渲染"麦克风静音/停止闹钟"
 			// 这类**命名**控件，而不是一个笼统的"开关/按下"。
-			Attributes: map[string]any{"controls": specControlsCached(ctx, c.Model)},
+			Attributes: map[string]any{"controls": filterControlsForDevice(ctx, external, c.Model, specControlsCached(ctx, c.Model))},
 		}); err != nil {
 			/*
 			 * ⚠ 必须记下**原因**（2026-11-10 用户实测"设备没进待绑定列表"）。
@@ -705,6 +705,54 @@ func specControls(ctx *plugin.Context, model string) []map[string]any {
  *
  * 这样同步的耗时与设备数线性但**没有网络长尾**，不会再撞执行预算。
  */
+/*
+ * filterControlsForDevice 对**老 miio 协议设备**裁掉规格里实际不通的属性。
+ *
+ * ★★★ 2026-11-24（用户「HX-MI 接入的设备控制开关坏的，配置也是坏的」）
+ *
+ * 实测事实（台灯 chuangmi.plug.m3，已被 miio-protocol.json 缓存为老协议）：
+ *   · 云端 MIoT spec 说它有 service 3 指示灯（标 write）；
+ *   · 但局域网 get_properties 对它稳定回 `code:-30001 Resp invalid json`；
+ *   · 局域网 set_properties 3.1 "成功"却是固件把它当主开关（写 3.1=false 会把
+ *     2.1 一起关掉，device_switch.go 注释里早有实测）。
+ * 也就是说**规格与固件不一致**：spec 承诺的指示灯在这台固件上既读不到也控不了。
+ *
+ * 参考实现 hass-xiaomi-miot 对这台设备的映射是：
+ *     'prop.2.1': power   → get_prop / set_power
+ *     'prop.2.2': temperature
+ * —— **没有 3.1**。老协议设备只有这些"字符串属性名"可控可读，MIoT 的 (siid,piid)
+ * 在它身上不是有效接口。所以老协议设备只保留白名单里的属性，不把假能力投影给平台
+ * （投了就是「点开关亮的却是另一个」「指示灯永远未知」这类用户看到的功能错乱）。
+ *
+ * 白名单按参考实现的 miio_specs 口径；没列出的 (siid,piid) 一律裁掉。
+ * 非老协议设备原样返回（它们的 MIoT 接口是通的）。
+ */
+var legacyWritableProps = map[string]bool{
+	"2.1": true, // power（主开关）
+	"2.2": true, // temperature（只读，保留给传感器用）
+}
+
+func filterControlsForDevice(ctx *plugin.Context, externalID, model string, controls []map[string]any) []map[string]any {
+	if len(controls) == 0 || externalID == "" {
+		return controls
+	}
+	if !loadLegacyDevices(ctx)[externalID] {
+		return controls
+	}
+	out := make([]map[string]any, 0, len(controls))
+	for _, c := range controls {
+		siid, _ := c["siid"].(int)
+		piid, _ := c["piid"].(int)
+		key := fmt.Sprintf("%d.%d", siid, piid)
+		if legacyWritableProps[key] {
+			out = append(out, c)
+			continue
+		}
+		ctx.Log(1, fmt.Sprintf("hx-mi 老协议设备裁掉规格属性 %s（device=%s model=%s）：该固件不支持 MIoT (siid,piid) 读写", key, externalID, model))
+	}
+	return out
+}
+
 func specControlsCached(ctx *plugin.Context, model string) []map[string]any {
 	if _, ok := lookupModelType(model); !ok {
 		return nil

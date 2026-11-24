@@ -1,11 +1,12 @@
 package main
 
 import (
-	"time"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"homex.dev/homex/sdk/go/plugin"
 )
@@ -125,7 +126,7 @@ func tryAutoRelogin(ctx *plugin.Context) error {
 
 	// step1：取签名参数
 	r, err := ctx.HTTPSessionDo(plugin.HTTPSessionRequest{SessionID: hs.SessionID, Method: "GET",
-		URL: "https://account.xiaomi.com/pass/serviceLogin?sid=xiaomiio&_json=true",
+		URL:     "https://account.xiaomi.com/pass/serviceLogin?sid=xiaomiio&_json=true",
 		Headers: xiaomiHeaders(deviceID), TimeoutMS: 15000})
 	if err != nil {
 		return fmt.Errorf("网络不确定: %w", err)
@@ -171,36 +172,74 @@ func tryAutoRelogin(ctx *plugin.Context) error {
 	}
 	autoReloginFailures = 0
 	invalidateSessionProbe() // 新票据生效：探针缓存立即作废（2026-11-20）
-	keep = true // 会话留给后续云端调用
+	keep = true              // 会话留给后续云端调用
 	ctx.LogWarn("hx-mi 已用保存的账号密码自动重登成功")
 	return nil
+}
+
+// ssecurityFromLocation 从小米换票地址（step2 响应的 location）里取出**配对的** ssecurity。
+//
+// # 为什么必须从 location 取（2026-11-24，`invalid signature` 的最终根因）
+//
+// 小米密码登录链路里，ssecurity 与 serviceToken 是**严格配对**的签名材料：
+// serviceToken 由 sts 按 location 下发，而用于 RC4 签名的 ssecurity 就写在
+// 同一条 location 的查询参数 `ssecurity=` 里。它们必须出自**同一次**换票。
+//
+// 扫码登录那条路（mi_qrlogin.go）从 JSON 响应直接拿到了 ssecurity，所以能用；
+// 而密码登录 / 自动重登这条路 ssecurity **只在 location 里**，JSON 主体是空的。
+// 此前 persistReloginMaterial 遇到空值就"回落到保险库旧值"——
+// **新 serviceToken 配旧 ssecurity** ⇒ 每个云端请求都报 `invalid signature`。
+//
+// 解析失败返回空串，由调用方明确报错，**绝不复用旧值**。
+func ssecurityFromLocation(loc string) string {
+	loc = strings.TrimSpace(loc)
+	if loc == "" {
+		return ""
+	}
+	u, err := url.Parse(loc)
+	if err != nil {
+		return ""
+	}
+	if v := u.Query().Get("ssecurity"); v != "" {
+		return v
+	}
+	if frag := u.Fragment; frag != "" {
+		if i := strings.Index(frag, "?"); i >= 0 {
+			frag = frag[i+1:]
+		}
+		if v, _ := url.ParseQuery(frag); v.Get("ssecurity") != "" {
+			return v.Get("ssecurity")
+		}
+	}
+	return ""
 }
 
 // persistReloginMaterial 把自动重登拿到的票据固化到会话材料与 cloud-session.json。
 //
 // 与正常登录流程（token_exchange.go 的 exchangeAndProbe）写的是同一份东西：
-//   · 保险库 `xiaomi_session_material`：ssecurity / passToken / 账号 / userId
-//   · `cloud-session.json`：给人看的字段 + secret 版本
+//
+//	· 保险库 `xiaomi_session_material`：ssecurity / passToken / 账号 / userId
+//	· `cloud-session.json`：给人看的字段 + secret 版本
 //
 // 只写这两个，不碰 account_store（账号本来就在库里，重登不是"加账号"）。
 func persistReloginMaterial(ctx *plugin.Context, sessionID, deviceID string, auth authResponse, user string) error {
 	// 从会话 jar 里取 ssecurity 的权威来源仍是 step1/serviceLoginAuth2 的响应；
 	// 这里优先用 auth 里的值，缺省回落到保险库已有值（不覆盖成空）。
-	ssec := auth.Ssecurity
-	passToken := auth.PassToken
+	/*
+	 * ★★★ ssecurity 的唯一来源是**本次换票的 location**（见 ssecurityFromLocation）。
+	 * 之前"auth.Ssecurity 为空就用保险库旧值"正是 invalid signature 的根因：
+	 * 新 serviceToken 配旧 ssecurity。这里宁可明确失败，也绝不混用两次换票的材料。
+	 * passToken 可以回落旧值（它只用于续登，不参与 RC4 签名，不会造成签名错配）。
+	 */
+	ssec := firstNonEmptyStr(auth.Ssecurity, ssecurityFromLocation(auth.Location))
 	old := cloudSecretMaterial{}
 	if blob, _, err := ctx.VaultBlobOpen("xiaomi_session_material"); err == nil && len(blob) > 0 {
 		_ = json.Unmarshal(blob, &old)
 	}
 	if ssec == "" {
-		ssec = old.Ssecurity
+		return errors.New("重登后未拿到配对的 ssecurity（location 缺参数）—— 拒绝复用旧值，请手动重新登录")
 	}
-	if passToken == "" {
-		passToken = old.PassToken
-	}
-	if ssec == "" {
-		return errors.New("重登后仍未拿到 ssecurity")
-	}
+	passToken := firstNonEmptyStr(auth.PassToken, old.PassToken)
 	userID := old.UserID
 	if v := fmt.Sprint(auth.UserID); v != "" && v != "<nil>" {
 		userID = v
