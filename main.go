@@ -397,6 +397,28 @@ func call(ctx *plugin.Context, tool string, args json.RawMessage) (json.RawMessa
 			return nil, fmt.Errorf("设备同步失败：%w", err)
 		}
 		return json.Marshal(map[string]any{"started": true})
+	case "relogin":
+		/*
+		 * 手动触发一次自动重登（2026-11-25）。
+		 *
+		 * 为什么要有这个工具：票据失效时用户只能干等同步自愈，而重登又有
+		 * 「连续失败 2 次就停止」的熔断 —— 一旦卡住就没有任何自助手段。
+		 * 现在用户可以点一次重试，我也能直接调它验证修复效果。
+		 * 语义与后台触发完全相同（同一条 tryAutoRelogin 路径）。
+		 */
+		before := autoReloginFailures
+		err := tryAutoRelogin(ctx)
+		out := map[string]any{"ok": err == nil}
+		if err != nil {
+			out["error"] = err.Error()
+			ctx.LogWarn("hx-mi 手动重登失败：%v", err)
+		} else {
+			ctx.LogWarn("hx-mi 手动重登成功")
+			out["message"] = "已重新登录，云端会话可用"
+		}
+		out["failures_before"] = before
+		out["failures_after"] = autoReloginFailures
+		return json.Marshal(out)
 	case "login":
 		return startLogin(ctx, args)
 	case "qr_start":

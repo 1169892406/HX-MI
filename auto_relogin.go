@@ -165,6 +165,60 @@ func tryAutoRelogin(ctx *plugin.Context) error {
 		return fmt.Errorf("登录未返回 location（code=%v %s）", auth.Code, explainLoginCode(auth.Code, firstNonEmptyStr(auth.Description, auth.Desc)))
 	}
 
+	/*
+	 * ★★★ 必须先**密封新票据**再落库（2026-11-25，连续 37 次 invalid signature 的真凶）
+	 *
+	 * 正常登录（token_exchange.go:74-95）的完整顺序是：
+	 *     ① 跟随 location 换票 → ② HTTPCookiesSeal 密封 3 个 host 的 cookie
+	 *     → ③ 按 host 重新 attach 回会话 → ④ RC4 探针 → ⑤ 通过才落库
+	 *
+	 * 而这里（自动重登）**漏了 ②③④**，只把 ssecurity/passToken 写进保险库。
+	 * 后果：会话一关，新 serviceToken 就丢了；下次 openCloudSession 从保险库
+	 * attach 出来的还是**旧 token**。
+	 *
+	 * 更糟的是我上一版把 ssecurity 改成"只取本次 location 的新值、绝不回落"，
+	 * 于是变成「新 ssecurity + 旧 serviceToken」——永久不匹配，
+	 * 失败次数从此只增不减（12:55 成功一次是旧代码，13:00 起全错）。
+	 * 这一步补上之后，材料才真正成对。
+	 */
+	hosts := []string{"account.xiaomi.com", "sts.api.io.mi.com", "api.io.mi.com"}
+	sealed := 0
+	for _, host := range hosts {
+		if r, e := ctx.HTTPCookiesSeal(plugin.HTTPCookiesRequest{SessionID: hs.SessionID, Host: host}); e == nil {
+			sealed += len(r.Sealed)
+			ctx.Log(1, fmt.Sprintf("hx-mi relogin sealed host=%s count=%d", host, len(r.Sealed)))
+		} else {
+			ctx.Log(2, fmt.Sprintf("hx-mi relogin seal host=%s err=%v", host, e))
+		}
+	}
+	if sealed == 0 {
+		autoReloginFailures++
+		return errors.New("自动重登未拿到可密封票据（STS 没有下发 serviceToken）")
+	}
+	// 部分跳转把 cookie 落在中间 host/域上 ⇒ 按显式 host attach 回同一会话再探针。
+	for _, host := range hosts {
+		_, _ = ctx.HTTPCookiesAttach(plugin.HTTPCookiesRequest{SessionID: hs.SessionID, Host: host})
+	}
+	/*
+	 * 探针：用**本次**的 ssecurity + deviceID 走 RC4 打一次 device_list。
+	 * 不通过就绝不落库 —— 宁可报"重登失败"让用户手动登录，也不把一对
+	 * 用不了的材料写进保险库（那正是连续失败 37 次的形态）。
+	 */
+	probeSec := firstNonEmptyStr(auth.Ssecurity, ssecurityFromLocation(auth.Location))
+	if probeSec == "" {
+		autoReloginFailures++
+		return errors.New("自动重登未拿到配对的 ssecurity（location 缺参数）")
+	}
+	if body, perr := apiPostRC4GuestDevice(ctx, hs.SessionID, probeSec, deviceID,
+		"https://api.io.mi.com/app/home/device_list",
+		`{"getVirtualModel":true,"getHuamiDevices":1,"get_split_device":false,"support_smart_home":true}`); perr != nil {
+		autoReloginFailures++
+		return fmt.Errorf("重登探针失败（已密封 %d 条票据，未落库）：%w", sealed, perr)
+	} else if env := map[string]json.RawMessage{}; json.Unmarshal(body, &env) != nil || env["result"] == nil {
+		autoReloginFailures++
+		return fmt.Errorf("重登探针响应不确定（已密封 %d 条票据，未落库）", sealed)
+	}
+
 	// 把新票据固化：沿用正常登录的落库路径
 	if err := persistReloginMaterial(ctx, hs.SessionID, deviceID, auth, user); err != nil {
 		autoReloginFailures++

@@ -155,7 +155,21 @@ func apiPostRC4GuestDevice(ctx *plugin.Context, sessionID, ssecurity, deviceID, 
 	return apiPostRC4GuestDeviceOnce(ctx, sessionID, newSSec, deviceID, apiURL, data)
 }
 
-// isServiceTokenExpired 判断错误是否是"服务票据过期"（需要刷新/重登）。
+// isServiceTokenExpired 判断错误是否是"票据失效"（需要刷新/重登）。
+//
+// ★★★ 2026-11-25（用户「连续失败 37 次：invalid signature」的真凶）
+//
+// 这里原来只认 SERVICETOKEN / SERVICE_TOKEN / AUTH_ERR / 登录已过期 四种。
+// 而 **`invalid signature` 不在其中**，于是：
+//
+//	· 每 2.5 分钟的自动同步拿到 `invalid signature`；
+//	· 被判成"不是票据问题"⇒ **永不触发自动重登**；
+//	· 于是一直报错、越积越多（用户看到 37 次），而重登一次都没被尝试过。
+//
+// `invalid signature` 的语义恰恰就是「ssecurity 与 serviceToken 不配对」——
+// 和"票据过期"属于同一类故障，都必须重登才能修。补进来之后才有自愈能力。
+//
+// 同时认 `auth error`：小米在 serviceToken 无效时也用它。
 func isServiceTokenExpired(err error) bool {
 	if err == nil {
 		return false
@@ -164,6 +178,8 @@ func isServiceTokenExpired(err error) bool {
 	return strings.Contains(msg, "SERVICETOKEN") ||
 		strings.Contains(msg, "SERVICE_TOKEN") ||
 		strings.Contains(msg, "AUTH_ERR") ||
+		strings.Contains(msg, "AUTH ERROR") ||
+		strings.Contains(msg, "INVALID SIGNATURE") ||
 		strings.Contains(msg, "登录已过期")
 }
 
