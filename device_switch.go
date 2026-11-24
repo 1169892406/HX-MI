@@ -82,8 +82,66 @@ func deviceSwitchTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 	out := map[string]any{"ok": false, "did": d.ExternalID, "siid": in.SIID, "piid": in.PIID, "value": in.Value}
 	params := []map[string]any{{"did": d.ExternalID, "siid": in.SIID, "piid": in.PIID, "value": in.Value}}
 
+	/*
+	 * ★★★ 老协议设备走参考项目的 set_<prop>（2026-11-24 用户「你他妈抄都抄不对吗，
+	 * 核心代码你倒是看啊」）。
+	 *
+	 * 参考项目 miio2miot.py:180：`setter: True` ⇒ 写方法名 = `set_` + 属性名。
+	 * 台灯 chuangmi.plug.m3 的真实映射（继承 m1 → hmi205）：
+	 *     prop.2.1 → power     ⇒ set_power(["on"/"off"])
+	 *     prop.3.1 → wifi_led  ⇒ set_wifi_led(["on"/"off"])   ← 指示灯
+	 *
+	 * 此前走 MIoT `set_properties` 写 3.1 会被固件当成主开关（实测写 3.1=false
+	 * 把 2.1 一起关了），所以"指示灯开关坏"、且读回值永远错。
+	 * 现在按表查属性名，用对应的 set_<prop> 精确下发。
+	 */
 	var lanErr, cloudErr error
 	source := ""
+	if lp := legacyPropsOf(d.Model); lp != nil {
+		key := fmt.Sprintf("%d.%d", in.SIID, in.PIID)
+		entry, ok := lp[key]
+		if ok && entry.Setter {
+			if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil && len(tok) == 16 {
+				word := "off"
+				if in.Value {
+					word = "on"
+				} else if entry.Format == "onoff" {
+					word = "off"
+				} else if !in.Value {
+					word = "off"
+				}
+				if in.Value {
+					word = "on"
+				}
+				if _, serr := miioExchange(ctx, d, tok, "set_"+entry.Prop, []string{word}); serr == nil {
+					source = "lan"
+					out["legacy_prop"] = entry.Prop
+					out["legacy_method"] = "set_" + entry.Prop
+				} else {
+					lanErr = serr
+				}
+			} else {
+				lanErr = errors.New("设备 token 不可用")
+			}
+			if source != "" {
+				out["ok"] = true
+				out["via"] = source
+				out["latency_ms"] = time.Since(started).Milliseconds()
+				// 回读同一个老协议属性（get_prop），这才是设备真值。
+				if tok2, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil {
+					if got, gerr := legacyGetProp(ctx, d, tok2, []string{entry.Prop}); gerr == nil {
+						if on, ok2 := legacyPowerValue(got[entry.Prop]); ok2 {
+							out["read_back"] = on
+						}
+					}
+				}
+				return json.Marshal(out)
+			}
+		} else if ok && !entry.Setter {
+			out["error"] = fmt.Sprintf("属性 %s（%s）是只读的，不能写", key, entry.Prop)
+			return json.Marshal(out)
+		}
+	}
 
 	/*
 	 * ★★ 2026-11-21 实测（用户「台灯配置按钮和开关按钮一样的能力映射错误了」）：

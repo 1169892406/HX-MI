@@ -216,9 +216,24 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 		}
 		svcName := firstNonEmptyStr(svc.Name, humanizeURN(svc.Type))
 		for _, pr := range svc.Properties {
-			if !hasAccess(pr.Access, "write") || !hasAccess(pr.Access, "read") {
-				continue // 详情页只给能读到值的控件（动作按钮在上面已收）
+			/*
+			 * ★★★ 2026-11-24（用户「小米天然气卫士支持自检和静音，现在都不支持也没有」
+			 *      +「所有设备支持的能力都要放开，不可以过滤删除」）
+			 *
+			 * 原来这里要求**同时可读可写**，于是 `['write']` 的只写属性被整条丢掉：
+			 * 天然气卫士 lumi.sensor_gas.mcn02 的 gas-sensor-control 服务里
+			 *      self-inspection (3.1)  uint8  ['write']   → 自检
+			 *      mute            (3.2)  uint8  ['write']   → 静音
+			 * 两条都只可写 ⇒ controls 恒 null ⇒ 界面上"自检/静音都没有"。
+			 *
+			 * 现在：可写就投影。**只写**属性做成「动作按钮」（点一下写固定值），
+			 * 不假装能回读状态；可读可写才做成开关/数值控件。
+			 * 判据与平台分工一致：有值可读的进控件，无值可读的进按钮 —— 都不是"删掉"。
+			 */
+			if !hasAccess(pr.Access, "write") {
+				continue // 纯只读在上面已收进 sensors
 			}
+			readable := hasAccess(pr.Access, "read")
 			cap := ""
 			switch pr.Format {
 			case "bool":
@@ -229,6 +244,24 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 				continue
 			}
 			name := firstNonEmptyStr(pr.Name, humanizeURN(pr.Type))
+			if !readable {
+				/*
+				 * 只写属性 ⇒ 「动作按钮」：写 1（MIoT 惯例：自检/静音用 1 触发）。
+				 * instance_id 保持 siid.piid，kind=prop-write 让前端渲染成按钮而非开关。
+				 */
+				controls = append(controls, map[string]any{
+					"capability":  "button",
+					"instance_id": fmt.Sprintf("%d.%d", svc.IID, pr.IID),
+					"name":        name,
+					"group":       svcName,
+					"kind":        "prop-write",
+					"siid":        svc.IID,
+					"piid":        pr.IID,
+					"format":      pr.Format,
+					"write_value": 1,
+				})
+				continue
+			}
 			nameCount[name]++
 			primary := false
 			if cap == "switch" && !primaryTaken && (actionNameOf(pr.Type) == "on" || strings.TrimSpace(pr.Name) == "开关") {
@@ -253,10 +286,11 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 		}
 	}
 	/*
-	 * ★ 老协议设备裁掉规格里实际不通的属性（2026-11-24，详见 filterControlsForDevice）：
-	 * 否则详情页投出「指示灯 开关」而它的值永远读不到（-30001），开关一直显示「未知」。
+	 * 不过滤任何能力（2026-11-24 用户：「所有设备支持的能力都要放开，不可以过滤删除」）。
+	 * 上一版我曾按老协议白名单裁掉 3.1 指示灯，那是错的 —— 参考项目里
+	 * chuangmi.plug.m1 明确有 `prop.3.1: {prop: wifi_led, setter: True}`，可读写。
 	 */
-	out["controls"] = filterControlsForDevice(ctx, d.ExternalID, d.Model, controls)
+	out["controls"] = controls
 	out["sensors"] = sensors
 
 	// —— ② 实时层：把可读属性真的读一遍 ——
@@ -270,46 +304,44 @@ func deviceDetailTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 	source := ""
 	var readErr error
 	/*
-	 * ★★ 老协议设备：用 `get_prop` + 字符串属性名读（2026-11-24）
-	 * 参考 hass-xiaomi-miot：'prop.2.1': power, 'prop.2.2': temperature。
-	 * MIoT 的 get_properties(siid/piid) 在这类固件上稳定回 -30001（实测 3 次一致）。
-	 * 把 get_prop 的结果按老协议映射填回 (siid,piid) 键，与下面 MIoT 路径同形。
+	 * ★★★ 老协议设备：按**参考项目的属性表**用 `get_prop` 读（2026-11-24）。
+	 *
+	 * 表来自 hass-xiaomi-miot 的 MIIO_TO_MIOT_SPECS（见 legacy_props.go）。
+	 * 台灯 chuangmi.plug.m3：2.1→power、2.2→temperature、3.1→wifi_led。
+	 * MIoT 的 get_properties(siid/piid) 在这类固件上稳定回 -30001（实测 3 次一致），
+	 * 所以必须走老协议字符串属性；读到的值按原 (siid,piid) 键填回，与 MIoT 路径同形。
+	 *
+	 * 全部属性一次读完（get_prop 支持多参数），不做任何取舍 —— 用户
+	 * 「所有设备支持的能力都要放开不可以过滤删除」。
 	 */
-	if strings.TrimSpace(d.Host) != "" {
-		if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil && len(tok) == 16 &&
-			isLegacyDevice(ctx, d, tok) {
-			names := []string{}
-			for _, rp := range readParams {
-				siid, _ := rp["siid"].(int)
-				piid, _ := rp["piid"].(int)
-				switch fmt.Sprintf("%d.%d", siid, piid) {
-				case "2.1":
-					names = append(names, "power")
-				case "2.2":
-					names = append(names, "temperature")
-				}
+	if lp := legacyPropsOf(d.Model); lp != nil && strings.TrimSpace(d.Host) != "" {
+		if tok, _, terr := ctx.VaultBlobOpenDevice("miio_token", d.ExternalID); terr == nil && len(tok) == 16 {
+			keys := make([]string, 0, len(lp))
+			names := make([]string, 0, len(lp))
+			for k, e := range lp {
+				keys = append(keys, k)
+				names = append(names, e.Prop)
 			}
-			if len(names) > 0 {
-				if got, gerr := legacyGetProp(ctx, d, tok, names); gerr == nil {
-					source = "lan"
-					for _, rp := range readParams {
-						siid, _ := rp["siid"].(int)
-						piid, _ := rp["piid"].(int)
-						key := fmt.Sprintf("%d.%d", siid, piid)
-						switch key {
-						case "2.1":
-							if on, ok := legacyPowerValue(got["power"]); ok {
-								values[key] = on
-							}
-						case "2.2":
-							if t, ok := legacyNumber(got["temperature"]); ok {
-								values[key] = t
-							}
+			// get_prop 的返回按入参顺序对齐 ⇒ 下标即对应。
+			if got, gerr := legacyGetProp(ctx, d, tok, names); gerr == nil {
+				source = "lan"
+				for i, k := range keys {
+					v := got[names[i]]
+					switch {
+					case strings.EqualFold(fmt.Sprint(v), "on"):
+						values[k] = true
+					case strings.EqualFold(fmt.Sprint(v), "off"):
+						values[k] = false
+					default:
+						if n, ok2 := legacyNumber(v); ok2 {
+							values[k] = n
+						} else if v != nil && fmt.Sprint(v) != "" {
+							values[k] = v
 						}
 					}
-				} else {
-					readErr = gerr
 				}
+			} else {
+				readErr = gerr
 			}
 		}
 	}
