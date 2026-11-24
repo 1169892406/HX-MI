@@ -236,14 +236,43 @@ func deviceSwitchTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessag
 	 * 只有一个 `switch` 槽 —— 往那里写辅助值会把主开关的状态盖掉。
 	 * 所以：主开关 → 回报；辅助开关 → 只回给前端（界面自己刷新）。
 	 */
-	if in.Primary {
-		if perr := ctx.DeviceStatePublish(plugin.DeviceStateRequest{
-			ExternalID: d.ExternalID,
-			State:      map[string]any{"switch": map[string]any{"power": in.Value}},
-			ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		}); perr != nil {
-			ctx.LogWarn("hx-mi 开关状态回报失败（device=%s）：%v", d.ExternalID, perr)
+	/*
+	 * ★★★ 辅助实例也回报状态（2026-11-24 用户「指示灯本身就可以关闭开启的，
+	 *      现在显示的是未知肯定不对啊」）。
+	 *
+	 * 原来只报主开关，注释理由是「平台状态行按能力合并，辅助值会盖掉主开关」。
+	 * 实测**这个理由不成立**：平台状态行的唯一键是 (capability, instance_id)，
+	 * 台灯已经存在 `switch/switch` 与 `switch/indicator_light_on` 两行。
+	 * 之所以以前报不上去，是平台 adapter 把 InstanceID 硬编码成了 capability
+	 * （已在 plugin.go 修：现在接受插件声明的实例名，用三层 state 形态）。
+	 *
+	 * 现在：写哪个实例就报哪个实例 —— 主开关报 switch，指示灯报
+	 * indicator_light_on（实例名与 device_detail/capabilities 完全一致）。
+	 */
+	instance := ""
+	if !in.Primary {
+		// 实例名与 cloud_sync 的命名口径一致：服务短名_属性名（indicator_light_on）。
+		if lp := legacyPropsOf(d.Model); lp != nil {
+			if e, ok := lp[fmt.Sprintf("%d.%d", in.SIID, in.PIID)]; ok && e.Prop != "" {
+				instance = e.Prop // wifi_led
+				instance = svcInstanceNameFor(in.SIID, e.Prop)
+			}
 		}
+		if instance == "" {
+			instance = fmt.Sprintf("svc%d_%s", in.SIID, "on")
+		}
+	}
+	stateVal := map[string]any{"power": in.Value}
+	stateBody := map[string]any{"switch": stateVal}
+	if instance != "" {
+		stateBody = map[string]any{"switch": map[string]any{instance: stateVal}}
+	}
+	if perr := ctx.DeviceStatePublish(plugin.DeviceStateRequest{
+		ExternalID: d.ExternalID,
+		State:      stateBody,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}); perr != nil {
+		ctx.LogWarn("hx-mi 开关状态回报失败（device=%s inst=%s）：%v", d.ExternalID, instance, perr)
 	}
 	return json.Marshal(out)
 }
@@ -493,4 +522,19 @@ func deviceControlTool(ctx *plugin.Context, args json.RawMessage) (json.RawMessa
 		out["value"] = in.Value
 	}
 	return json.Marshal(out)
+}
+
+// svcInstanceNameFor 复刻 cloud_sync 里的实例命名口径：
+// 主开关（属性名 on / power）用能力名本身，其余用「服务短名_属性名」。
+//
+// 台灯的指示灯在老协议里属性名是 wifi_led，而平台能力实例叫 indicator_light_on
+// （cloud_sync 按 MIoT 规格的 service type 生成）。两边必须对上，否则状态又写错行。
+func svcInstanceNameFor(siid int, prop string) string {
+	if siid == 2 && (prop == "on" || prop == "power") {
+		return "" // 主开关：走历史形态（实例名 = capability = switch）
+	}
+	if siid == 3 {
+		return "indicator_light_on"
+	}
+	return fmt.Sprintf("svc%d_%s", siid, prop)
 }

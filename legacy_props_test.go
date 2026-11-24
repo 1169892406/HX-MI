@@ -75,3 +75,15 @@ func TestLegacyProps_TableCoverage(t *testing.T) {
 		t.Fatalf("属性映射只有 %d 条，参考项目约 1698 条 —— 生成时漏了", total)
 	}
 }
+
+// 实例名必须与平台能力实例逐字一致，否则状态又写错行（2026-11-24）。
+func TestSvcInstanceName_MatchesCapabilityInstance(t *testing.T) {
+	// 台灯：service 2 主开关 → 历史形态（实例名 = 能力名 switch）
+	if got := svcInstanceNameFor(2, "power"); got != "" {
+		t.Fatalf("主开关应返回空串（走 capability 作为实例名），得到 %q", got)
+	}
+	// service 3 指示灯 → indicator_light_on（cloud_sync: svcIID + "_" + propName）
+	if got := svcInstanceNameFor(3, "wifi_led"); got != "indicator_light_on" {
+		t.Fatalf("指示灯实例名 = %q，平台能力实例是 indicator_light_on", got)
+	}
+}

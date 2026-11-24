@@ -780,9 +780,13 @@ func buildSpecControls(ctx *plugin.Context, model string, sp miotSpec) []map[str
 			 * 撞上 `device_capabilities` 的唯一键
 			 * `(device_id, endpoint_id, type, instance_id)` ⇒ 配对直接 500。
 			 *
-			 * 现在：主开关（第一个 on）→ `switch`（与状态行的 instance_id 对齐，
-			 * 平台上报状态时无法带实例，只能按能力名记）；
+			 * 现在：主开关（第一个 on）→ `switch`；
 			 * 指示灯 → `indicator_light_on`（保持「服务名_属性名」）。
+			 *
+			 * ★ 2026-11-24 更正：这里原来还写着「平台上报状态时无法带实例，只能按
+			 * 能力名记」—— 那是平台 adapter 把 InstanceID 硬编码成 capability 造成的，
+			 * 不是契约限制。平台已修（plugin.go 接受插件声明的实例名，三层 state
+			 * 形态），所以 `indicator_light_on` 这一行现在能真正收到自己的状态。
 			 */
 			if propName == "on" && !onTaken[capName] {
 				instName = capName
