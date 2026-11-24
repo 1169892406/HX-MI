@@ -57,10 +57,23 @@ func openCloudSession(ctx *plugin.Context) (string, string, string, error) {
 		return "", "", "", err
 	}
 	attached := 0
+	/*
+	 * 逐 host 记 attach 结果（2026-11-25）。
+	 *
+	 * 这一行是**诊断必需**：`invalid signature` 有两个完全不同的成因 ——
+	 *   · 票据没进会话（attach 不到）→ 请求根本没带 serviceToken；
+	 *   · 票据进了但 ssecurity 不配对 → 签名算错。
+	 * 没有这个日志就只能靠猜，而我已经猜错过三次。
+	 * 尤其要看 `api.io.mi.com` 那行：seal 时它常是 0 条（cookie 下发在
+	 * sts.api.io.mi.com 域上），靠宿主 SealCookies 的跨 host 回落补齐。
+	 */
 	for _, host := range []string{"account.xiaomi.com", "sts.api.io.mi.com", "api.io.mi.com"} {
 		a, e := ctx.HTTPCookiesAttach(plugin.HTTPCookiesRequest{SessionID: hs.SessionID, Host: host})
 		if e == nil {
 			attached += len(a.Attached)
+			ctx.Log(1, fmt.Sprintf("hx-mi 会话 attach host=%s ok=%d missing=%v", host, len(a.Attached), a.Missing))
+		} else {
+			ctx.Log(2, fmt.Sprintf("hx-mi 会话 attach host=%s err=%v", host, e))
 		}
 	}
 	if attached == 0 {

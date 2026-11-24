@@ -147,12 +147,30 @@ func apiPostRC4GuestDevice(ctx *plugin.Context, sessionID, ssecurity, deviceID, 
 		ctx.LogWarn("hx-mi 自动重登失败：%v", rerr)
 		return raw, err
 	}
-	// 重登后会话材料已更新：用新的 ssecurity 重试一次。
-	_, newSSec, _, oerr := openCloudSession(ctx)
+	/*
+	 * ★★★ 重登后必须用**新会话**重试（2026-11-25，连续失败 40 次的直接原因）
+	 *
+	 * 原来这行是 `_, newSSec, _, oerr := openCloudSession(ctx)` ——
+	 * 把新会话的 sessionID 丢弃了，却拿**旧 sessionID** 去重试：
+	 *     return apiPostRC4GuestDeviceOnce(ctx, sessionID, newSSec, ...)
+	 *
+	 * 而旧会话的 jar 里没有重登产生的新 serviceToken（那些票据是密封进保险库、
+	 * 由 openCloudSession 重新 attach 到**新会话**上的）。于是：
+	 *   · 重登本身成功（探针用的是重登那个会话的 jar）→ 日志「自动重登成功」
+	 *   · 紧接着重试仍用旧会话 → 又一次 invalid signature
+	 * 日志时间戳把这件事钉死了：00:20:03.436 重登成功 → .514 同步失败。
+	 *
+	 * 顺带修掉一个会话泄漏：旧写法打开新会话却从不关闭（宿主上限 4 个）。
+	 */
+	newSess, newSSec, newDevID, oerr := openCloudSession(ctx)
 	if oerr != nil || newSSec == "" {
 		return raw, err
 	}
-	return apiPostRC4GuestDeviceOnce(ctx, sessionID, newSSec, deviceID, apiURL, data)
+	defer func() { _ = ctx.HTTPClose(newSess) }()
+	if newDevID == "" {
+		newDevID = deviceID
+	}
+	return apiPostRC4GuestDeviceOnce(ctx, newSess, newSSec, newDevID, apiURL, data)
 }
 
 // isServiceTokenExpired 判断错误是否是"票据失效"（需要刷新/重登）。
